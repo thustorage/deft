@@ -27,7 +27,7 @@ Directory::~Directory() { delete chunckAlloc; }
 
 void Directory::dirThread() {
 
-  bindCore(23 - dirID);
+  // bindCore(31 - dirID);
   Debug::notifyInfo("thread %d in memory nodes runs...\n", dirID);
 
   while (true) {

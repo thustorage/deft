@@ -44,7 +44,7 @@ int pollOnce(ibv_cq *cq, int pollNumber, struct ibv_wc *wc) {
 
 static inline void fillSgeWr(ibv_sge &sg, ibv_send_wr &wr, uint64_t source,
                              uint64_t size, uint32_t lkey) {
-  memset(&sg, 0, sizeof(sg));
+  // memset(&sg, 0, sizeof(sg));
   sg.addr = (uintptr_t)source;
   sg.length = size;
   sg.lkey = lkey;
@@ -57,7 +57,7 @@ static inline void fillSgeWr(ibv_sge &sg, ibv_send_wr &wr, uint64_t source,
 
 static inline void fillSgeWr(ibv_sge &sg, ibv_recv_wr &wr, uint64_t source,
                              uint64_t size, uint32_t lkey) {
-  memset(&sg, 0, sizeof(sg));
+  // memset(&sg, 0, sizeof(sg));
   sg.addr = (uintptr_t)source;
   sg.length = size;
   sg.lkey = lkey;
@@ -70,7 +70,7 @@ static inline void fillSgeWr(ibv_sge &sg, ibv_recv_wr &wr, uint64_t source,
 
 static inline void fillSgeWr(ibv_sge &sg, ibv_exp_send_wr &wr, uint64_t source,
                              uint64_t size, uint32_t lkey) {
-  memset(&sg, 0, sizeof(sg));
+  // memset(&sg, 0, sizeof(sg));
   sg.addr = (uintptr_t)source;
   sg.length = size;
   sg.lkey = lkey;
@@ -273,7 +273,7 @@ bool rdmaFetchAndAddBoundary(ibv_qp *qp, uint64_t source, uint64_t dest,
 
   auto &op = wr.ext_op.masked_atomics.wr_data.inline_data.op.fetch_add;
   op.add_val = add;
-  op.field_boundary = 1ull << boundary;
+  op.field_boundary = boundary;
 
   if (ibv_exp_post_send(qp, &wr, &wrBad)) {
     Debug::notifyError("Send with MASK FETCH_AND_ADD failed.");
@@ -315,7 +315,8 @@ bool rdmaCompareAndSwap(ibv_qp *qp, uint64_t source, uint64_t dest,
 
 bool rdmaCompareAndSwapMask(ibv_qp *qp, uint64_t source, uint64_t dest,
                             uint64_t compare, uint64_t swap, uint32_t lkey,
-                            uint32_t remoteRKey, uint64_t mask, bool singal) {
+                            uint32_t remoteRKey, uint64_t mask, bool singal,
+                            uint64_t wrID) {
   struct ibv_sge sg;
   struct ibv_exp_send_wr wr;
   struct ibv_exp_send_wr *wrBad;
@@ -324,6 +325,7 @@ bool rdmaCompareAndSwapMask(ibv_qp *qp, uint64_t source, uint64_t dest,
 
   wr.exp_opcode = IBV_EXP_WR_EXT_MASKED_ATOMIC_CMP_AND_SWP;
   wr.exp_send_flags = IBV_EXP_SEND_EXT_ATOMIC_INLINE;
+  wr.wr_id = wrID;
 
   if (singal) {
     wr.exp_send_flags |= IBV_EXP_SEND_SIGNALED;
@@ -347,6 +349,35 @@ bool rdmaCompareAndSwapMask(ibv_qp *qp, uint64_t source, uint64_t dest,
   return true;
 }
 
+bool rdmaReadBatch(ibv_qp *qp, RdmaOpRegion *ror, int k, bool isSignaled,
+                   uint64_t wrID) {
+  struct ibv_sge sg[kOroMax];
+  struct ibv_send_wr wr[kOroMax];
+  struct ibv_send_wr *wrBad;
+
+  for (int i = 0; i < k; ++i) {
+    fillSgeWr(sg[i], wr[i], ror[i].source, ror[i].size, ror[i].lkey);
+
+    wr[i].next = (i == k - 1) ? NULL : &wr[i + 1];
+
+    wr[i].opcode = IBV_WR_RDMA_READ;
+
+    if (i == k - 1 && isSignaled) {
+      wr[i].send_flags = IBV_SEND_SIGNALED;
+    }
+
+    wr[i].wr.rdma.remote_addr = ror[i].dest;
+    wr[i].wr.rdma.rkey = ror[i].remoteRKey;
+    wr[i].wr_id = wrID;
+  }
+
+  if (ibv_post_send(qp, &wr[0], &wrBad) != 0) {
+    Debug::notifyError("Send with RDMA_READ_BATCH failed.");
+    sleep(10);
+    return false;
+  }
+  return true;
+}
 
 bool rdmaWriteBatch(ibv_qp *qp, RdmaOpRegion *ror, int k, bool isSignaled,
                     uint64_t wrID) {
@@ -400,13 +431,81 @@ bool rdmaCasRead(ibv_qp *qp, const RdmaOpRegion &cas_ror,
   wr[1].wr.rdma.remote_addr = read_ror.dest;
   wr[1].wr.rdma.rkey = read_ror.remoteRKey;
   wr[1].wr_id = wrID;
-  wr[1].send_flags |= IBV_SEND_FENCE;
+  // wr[1].send_flags |= IBV_SEND_FENCE;
   if (isSignaled) {
     wr[1].send_flags |= IBV_SEND_SIGNALED;
   }
 
   if (ibv_post_send(qp, &wr[0], &wrBad)) {
     Debug::notifyError("Send with CAS_READs failed.");
+    sleep(10);
+    return false;
+  }
+  return true;
+}
+
+bool rdmaFaaRead(ibv_qp *qp, const RdmaOpRegion &faa_ror,
+                 const RdmaOpRegion &read_ror, uint64_t add, bool isSignaled,
+                 uint64_t wrID) {
+  struct ibv_sge sg[2];
+  struct ibv_send_wr wr[2];
+  struct ibv_send_wr *wrBad;
+
+  fillSgeWr(sg[0], wr[0], faa_ror.source, 8, faa_ror.lkey);
+  wr[0].opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
+  wr[0].wr.atomic.remote_addr = faa_ror.dest;
+  wr[0].wr.atomic.rkey = faa_ror.remoteRKey;
+  wr[0].wr.atomic.compare_add = add;
+  wr[0].next = &wr[1];
+
+  fillSgeWr(sg[1], wr[1], read_ror.source, read_ror.size, read_ror.lkey);
+  wr[1].opcode = IBV_WR_RDMA_READ;
+  wr[1].wr.rdma.remote_addr = read_ror.dest;
+  wr[1].wr.rdma.rkey = read_ror.remoteRKey;
+  wr[1].wr_id = wrID;
+  // wr[1].send_flags |= IBV_SEND_FENCE;
+  if (isSignaled) {
+    wr[1].send_flags |= IBV_SEND_SIGNALED;
+  }
+
+  if (ibv_post_send(qp, &wr[0], &wrBad)) {
+    Debug::notifyError("Send with CAS_READs failed.");
+    sleep(10);
+    return false;
+  }
+  return true;
+}
+
+bool rdmaFaaBoundRead(ibv_qp *qp, const RdmaOpRegion &faab_ror,
+                      const RdmaOpRegion &read_ror, uint64_t add,
+                      uint64_t boundary, bool isSignaled, uint64_t wr_id) {
+  struct ibv_sge sg[2];
+  struct ibv_exp_send_wr wr[2];
+  struct ibv_exp_send_wr *wrBad;
+
+  fillSgeWr(sg[0], wr[0], faab_ror.source, 8, faab_ror.lkey);
+  wr[0].exp_opcode = IBV_EXP_WR_EXT_MASKED_ATOMIC_FETCH_AND_ADD;
+  wr[0].exp_send_flags = IBV_EXP_SEND_EXT_ATOMIC_INLINE;
+  // wr[0].wr_id = wr_id;
+  wr[0].ext_op.masked_atomics.log_arg_sz = 3;
+  wr[0].ext_op.masked_atomics.remote_addr = faab_ror.dest;
+  wr[0].ext_op.masked_atomics.rkey = faab_ror.remoteRKey;
+  auto &op = wr[0].ext_op.masked_atomics.wr_data.inline_data.op.fetch_add;
+  op.add_val = add;
+  op.field_boundary = boundary;
+  wr[0].next = &wr[1];
+
+  fillSgeWr(sg[1], wr[1], read_ror.source, read_ror.size, read_ror.lkey);
+  wr[1].exp_opcode = IBV_EXP_WR_RDMA_READ;
+  wr[1].wr.rdma.remote_addr = read_ror.dest;
+  wr[1].wr.rdma.rkey = read_ror.remoteRKey;
+  wr[1].wr_id = wr_id;
+  if (isSignaled) {
+    wr[1].exp_send_flags |= IBV_SEND_SIGNALED;
+  }
+
+  if (ibv_exp_post_send(qp, wr, &wrBad)) {
+    Debug::notifyError("Send with FAAB_READ failed.");
     sleep(10);
     return false;
   }

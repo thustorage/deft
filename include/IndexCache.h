@@ -60,7 +60,7 @@ inline IndexCache::IndexCache(int cache_size) : cache_size(cache_size) {
   skiplist = new CacheSkipList(cmp, &alloc, 21);
   uint64_t memory_size = define::MB * cache_size;
 
-  all_page_cnt = memory_size / sizeof(InternalPage);
+  all_page_cnt = memory_size / kInternalPageSize;
   free_page_cnt.store(all_page_cnt);
   skiplist_node_cnt.store(0);
 }
@@ -101,7 +101,7 @@ inline const CacheEntry *IndexCache::find_entry(const Key &k) {
 
 inline bool IndexCache::add_to_cache(InternalPage *page) {
   auto new_page = (InternalPage *)malloc(kInternalPageSize);
-  memcpy(new_page, page, kInternalPageSize);
+  memcpy(new_page, page, sizeof(InternalPage));
   new_page->index_cache_freq = 0;
 
   if (this->add_entry(page->hdr.lowest, page->hdr.highest, new_page)) {

@@ -122,7 +122,7 @@ bool rdmaCompareAndSwap(ibv_qp *qp, uint64_t source, uint64_t dest,
 bool rdmaCompareAndSwapMask(ibv_qp *qp, uint64_t source, uint64_t dest,
                             uint64_t compare, uint64_t swap, uint32_t lkey,
                             uint32_t remoteRKey, uint64_t mask = ~(0ull),
-                            bool signal = true);
+                            bool signal = true, uint64_t wrID = 0);
 
 //// Utility.cpp
 void rdmaQueryQueuePair(ibv_qp *qp);
@@ -132,9 +132,17 @@ void checkDMSupported(struct ibv_context *ctx);
 //// specified
 bool rdmaWriteBatch(ibv_qp *qp, RdmaOpRegion *ror, int k, bool isSignaled,
                     uint64_t wrID = 0);
+bool rdmaReadBatch(ibv_qp *qp, RdmaOpRegion *ror, int k, bool isSignaled,
+                   uint64_t wrID = 0);
 bool rdmaCasRead(ibv_qp *qp, const RdmaOpRegion &cas_ror,
                  const RdmaOpRegion &read_ror, uint64_t compare, uint64_t swap,
                  bool isSignaled, uint64_t wrID = 0);
+bool rdmaFaaRead(ibv_qp *qp, const RdmaOpRegion &faab_ror,
+                 const RdmaOpRegion &read_ror, uint64_t add, bool isSignaled,
+                 uint64_t wr_id = 0);
+bool rdmaFaaBoundRead(ibv_qp *qp, const RdmaOpRegion &faab_ror,
+                      const RdmaOpRegion &read_ror, uint64_t add,
+                      uint64_t boundary, bool isSignaled, uint64_t wr_id = 0);
 bool rdmaWriteFaa(ibv_qp *qp, const RdmaOpRegion &write_ror,
                   const RdmaOpRegion &faa_ror, uint64_t add_val,
                   bool isSignaled, uint64_t wrID = 0);

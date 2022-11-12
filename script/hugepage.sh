@@ -1,2 +1,2 @@
 #!/bin/bash
-sysctl -w vm.nr_hugepages=32768
+sudo sysctl -w vm.nr_hugepages=32768

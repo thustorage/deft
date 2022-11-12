@@ -42,6 +42,10 @@ public:
   void write_sync(const char *buffer, GlobalAddress gaddr, size_t size,
                   CoroContext *ctx = nullptr);
 
+  void read_batch(RdmaOpRegion *rs, int k, bool signal = true,
+                  CoroContext *ctx = nullptr);
+  void read_batch_sync(RdmaOpRegion *rs, int k, CoroContext *ctx = nullptr);
+
   void write_batch(RdmaOpRegion *rs, int k, bool signal = true,
                    CoroContext *ctx = nullptr);
   void write_batch_sync(RdmaOpRegion *rs, int k, CoroContext *ctx = nullptr);
@@ -67,6 +71,18 @@ public:
                 uint64_t val, bool signal = true, CoroContext *ctx = nullptr);
   bool cas_read_sync(RdmaOpRegion &cas_ror, RdmaOpRegion &read_ror,
                      uint64_t equal, uint64_t val, CoroContext *ctx = nullptr);
+
+  void faa_read(RdmaOpRegion &faab_ror, RdmaOpRegion &read_ror, uint64_t add,
+                bool signal = true, CoroContext *ctx = nullptr);
+  void faa_read_sync(RdmaOpRegion &faab_ror, RdmaOpRegion &read_ror,
+                     uint64_t add, CoroContext *ctx = nullptr);
+
+  void faab_read(RdmaOpRegion &faab_ror, RdmaOpRegion &read_ror, uint64_t add,
+                 uint64_t boundary, bool signal = true,
+                 CoroContext *ctx = nullptr);
+  void faab_read_sync(RdmaOpRegion &faab_ror, RdmaOpRegion &read_ror,
+                      uint64_t add, uint64_t boundary,
+                      CoroContext *ctx = nullptr);
 
   void cas_mask(GlobalAddress gaddr, uint64_t equal, uint64_t val,
                 uint64_t *rdma_buffer, uint64_t mask = ~(0ull),
@@ -100,9 +116,10 @@ public:
 
   void cas_dm_mask(GlobalAddress gaddr, uint64_t equal, uint64_t val,
                    uint64_t *rdma_buffer, uint64_t mask = ~(0ull),
-                   bool signal = true);
+                   bool signal = true, CoroContext *ctx = nullptr);
   bool cas_dm_mask_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
-                        uint64_t *rdma_buffer, uint64_t mask = ~(0ull));
+                        uint64_t *rdma_buffer, uint64_t mask = ~(0ull),
+                        CoroContext *ctx = nullptr);
 
   void faa_dm_boundary(GlobalAddress gaddr, uint64_t add_val,
                        uint64_t *rdma_buffer, uint64_t mask = 63,

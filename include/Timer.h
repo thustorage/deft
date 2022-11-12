@@ -12,7 +12,7 @@ public:
   void begin() { clock_gettime(CLOCK_REALTIME, &s); }
 
   uint64_t end(uint64_t loop = 1) {
-    this->loop = loop;
+    // this->loop = loop;
     clock_gettime(CLOCK_REALTIME, &e);
     uint64_t ns_all =
         (e.tv_sec - s.tv_sec) * 1000000000ull + (e.tv_nsec - s.tv_nsec);
@@ -54,7 +54,7 @@ public:
 
 private:
   timespec s, e;
-  uint64_t loop;
+  // uint64_t loop;
   uint64_t ns;
 };
 

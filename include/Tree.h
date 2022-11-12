@@ -8,6 +8,27 @@
 #include <iostream>
 
 class IndexCache;
+extern uint64_t cache_miss[MAX_APP_THREAD][8];
+extern uint64_t cache_hit[MAX_APP_THREAD][8];
+extern uint64_t latency[MAX_APP_THREAD][LATENCY_WINDOWS];
+
+enum latency_enum { lat_lock, lat_read_page, lat_write_page, lat_op };
+
+struct alignas(64) StatHelper {
+  uint64_t latency_[MAX_APP_THREAD][8];
+  uint64_t counter_[MAX_APP_THREAD][8];
+
+  StatHelper() {
+    memset(this, 0, sizeof(StatHelper));
+  }
+
+  void add(int th_id, int enum_id, uint64_t stat) {
+    latency_[th_id][enum_id] += stat;
+    ++counter_[th_id][enum_id];
+  }
+};
+
+extern StatHelper stat_helper;
 
 struct LocalLockNode {
   std::atomic<uint64_t> ticket_lock;
@@ -55,7 +76,7 @@ public:
 
   void print_and_check_tree(CoroContext *cxt = nullptr, int coro_id = 0);
 
-  void run_coroutine(CoroFunc func, int id, int coro_cnt);
+  void run_coroutine(CoroFunc func, int id, int coro_cnt, bool lock_bench);
 
   void lock_bench(const Key &k, CoroContext *cxt = nullptr, int coro_id = 0);
 
@@ -82,7 +103,8 @@ private:
   GlobalAddress get_root_ptr_ptr();
   GlobalAddress get_root_ptr(CoroContext *cxt, int coro_id);
 
-  void coro_worker(CoroYield &yield, RequstGen *gen, int coro_id);
+  void coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
+                   bool lock_bench);
   void coro_master(CoroYield &yield, int coro_cnt);
 
   void broadcast_new_root(GlobalAddress new_root_addr, int root_level);
@@ -97,14 +119,31 @@ private:
                      CoroContext *cxt, int coro_id);
   void unlock_addr(GlobalAddress lock_addr, uint64_t tag, uint64_t *buf,
                    CoroContext *cxt, int coro_id, bool async);
+  bool try_x_lock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                       int coro_id);
+  void unlock_x_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                     int coro_id, bool async);
+  bool try_s_lock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                       int coro_id);
+  void unlock_s_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                     int coro_id, bool async);
+  void try_sx_lock_addr(GlobalAddress lock_addr, uint64_t *buf,
+                        CoroContext *cxt, int coro_id, bool sx_lock);
+  void unlock_sx_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                      int coro_id, bool async, bool sx_lock);
   void write_page_and_unlock(char *page_buffer, GlobalAddress page_addr,
                              int page_size, uint64_t *cas_buffer,
                              GlobalAddress lock_addr, uint64_t tag,
-                             CoroContext *cxt, int coro_id, bool async);
+                             CoroContext *cxt, int coro_id, bool async,
+                             bool sx_lock);
   void lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
                           int page_size, uint64_t *cas_buffer,
                           GlobalAddress lock_addr, uint64_t tag,
-                          CoroContext *cxt, int coro_id);
+                          CoroContext *cxt, int coro_id, bool sx_lock);
+  void batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
+                                int page_size, uint64_t *cas_buffer,
+                                GlobalAddress lock_addr, uint64_t tag,
+                                CoroContext *cxt, int coro_id, bool sx_lock);
 
   bool page_search(GlobalAddress page_addr, const Key &k, SearchResult &result,
                    CoroContext *cxt, int coro_id, bool from_cache = false);
@@ -117,7 +156,8 @@ private:
                            CoroContext *cxt, int coro_id);
   bool leaf_page_store(GlobalAddress page_addr, const Key &k, const Value &v,
                        GlobalAddress root, int level, CoroContext *cxt,
-                       int coro_id, bool from_cache = false);
+                       int coro_id, bool from_cache = false,
+                       bool sx_lock = false);
   bool leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
                      CoroContext *cxt, int coro_id, bool from_cache = false);
 
@@ -131,10 +171,10 @@ class Header {
 private:
   GlobalAddress leftmost_ptr;
   GlobalAddress sibling_ptr;
-  uint8_t level;
-  int16_t last_index;
   Key lowest;
   Key highest;
+  uint16_t level;
+  int16_t last_index;
 
   friend class InternalPage;
   friend class LeafPage;
@@ -195,7 +235,7 @@ constexpr int kLeafCardinality =
     sizeof(LeafEntry);
 
 class InternalPage {
-private:
+// private:
   union {
     uint32_t crc;
     uint64_t embedding_lock;
