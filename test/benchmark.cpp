@@ -96,10 +96,14 @@ void thread_run(int id) {
   }
 
   uint64_t end_warm_key = kWarmRatio * kKeySpace;
-  for (uint64_t i = 1; i < end_warm_key; ++i) {
-    if (i % all_thread == my_id) {
-      tree->insert(to_key(i), i * 2);
-    }
+  uint64_t begin_warm_key;
+  if (my_id == 0) {
+    begin_warm_key = all_thread;
+  } else {
+    begin_warm_key = my_id;
+  }
+  for (uint64_t i = begin_warm_key; i < end_warm_key; i += all_thread) {
+    tree->insert(to_key(i), i * 2);
   }
 
   warmup_cnt.fetch_add(1);
@@ -248,6 +252,7 @@ int main(int argc, char *argv[]) {
 
 #ifndef BENCH_LOCK
   if (dsm->getMyNodeID() == 0) {
+    tree->insert(to_key(0), 1);
     for (uint64_t i = 1; i < 1024000; ++i) {
       tree->insert(to_key(i), i * 2);
     }

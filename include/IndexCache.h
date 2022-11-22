@@ -136,7 +136,7 @@ inline const CacheEntry *IndexCache::search_from_cache(const Key &k,
                                                        bool is_leader) {
   // notice: please ensure the thread 0 can make progress
   if (is_leader &&
-      !delay_free_list.empty()) { // try to free a page in the delay-free-list
+      !delay_free_list.empty()) {  // try to free a page in the delay-free-list
     auto p = delay_free_list.front();
     if (asm_rdtsc() - p.second > 3000ull * 10) {
       free(p.first);

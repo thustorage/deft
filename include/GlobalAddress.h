@@ -3,24 +3,23 @@
 
 #include "Common.h"
 
-
 class GlobalAddress {
-public:
-
-union {
-  struct {
-  uint64_t nodeID: 16;
-  uint64_t offset : 48;
+ public:
+  union {
+    struct {
+      // uint64_t nodeID: 16;
+      uint64_t hash_offset : 8;  // leaf node's hash offset
+      uint64_t nodeID : 8;
+      uint64_t offset : 48;
+    };
+    uint64_t val;
   };
-  uint64_t val;
-};
 
- operator uint64_t() {
-  return val;
-}
+  operator uint64_t() { return val; }
 
   static GlobalAddress Null() {
-    static GlobalAddress zero{0, 0};
+    static GlobalAddress zero;
+    assert(zero.val == 0);
     return zero;
   };
 } __attribute__((packed));
@@ -42,7 +41,8 @@ inline bool operator!=(const GlobalAddress &lhs, const GlobalAddress &rhs) {
 }
 
 inline std::ostream &operator<<(std::ostream &os, const GlobalAddress &obj) {
-  os << "[" << (int)obj.nodeID << ", " << obj.offset << "]";
+  os << "[" << (int)obj.nodeID << ", " << obj.offset << ", " << obj.hash_offset
+     << "]";
   return os;
 }
 

@@ -56,135 +56,39 @@ struct SearchResult {
   GlobalAddress slibing;
   GlobalAddress next_level;
   Value val;
-};
+  Key other_in_group = 0;
 
-class InternalPage;
-class LeafPage;
-class Tree {
-
-public:
-  Tree(DSM *dsm, uint16_t tree_id = 0);
-
-  void insert(const Key &k, const Value &v, CoroContext *cxt = nullptr,
-              int coro_id = 0);
-  bool search(const Key &k, Value &v, CoroContext *cxt = nullptr,
-              int coro_id = 0);
-  void del(const Key &k, CoroContext *cxt = nullptr, int coro_id = 0);
-
-  uint64_t range_query(const Key &from, const Key &to, Value *buffer,
-                       CoroContext *cxt = nullptr, int coro_id = 0);
-
-  void print_and_check_tree(CoroContext *cxt = nullptr, int coro_id = 0);
-
-  void run_coroutine(CoroFunc func, int id, int coro_cnt, bool lock_bench);
-
-  void lock_bench(const Key &k, CoroContext *cxt = nullptr, int coro_id = 0);
-
-  void index_cache_statistics();
-  void clear_statistics();
-
-private:
-  DSM *dsm;
-  uint64_t tree_id;
-  GlobalAddress root_ptr_ptr; // the address which stores root pointer;
-
-  // static thread_local int coro_id;
-  static thread_local CoroCall worker[define::kMaxCoro];
-  static thread_local CoroCall master;
-
-  LocalLockNode *local_locks[MAX_MACHINE];
-
-  IndexCache *index_cache;
-
-  void print_verbose();
-
-  void before_operation(CoroContext *cxt, int coro_id);
-
-  GlobalAddress get_root_ptr_ptr();
-  GlobalAddress get_root_ptr(CoroContext *cxt, int coro_id);
-
-  void coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
-                   bool lock_bench);
-  void coro_master(CoroYield &yield, int coro_cnt);
-
-  void broadcast_new_root(GlobalAddress new_root_addr, int root_level);
-  bool update_new_root(GlobalAddress left, const Key &k, GlobalAddress right,
-                       int level, GlobalAddress old_root, CoroContext *cxt,
-                       int coro_id);
-
-  void insert_internal(const Key &k, GlobalAddress v, CoroContext *cxt,
-                       int coro_id, int level);
-
-  bool try_lock_addr(GlobalAddress lock_addr, uint64_t tag, uint64_t *buf,
-                     CoroContext *cxt, int coro_id);
-  void unlock_addr(GlobalAddress lock_addr, uint64_t tag, uint64_t *buf,
-                   CoroContext *cxt, int coro_id, bool async);
-  bool try_x_lock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
-                       int coro_id);
-  void unlock_x_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
-                     int coro_id, bool async);
-  bool try_s_lock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
-                       int coro_id);
-  void unlock_s_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
-                     int coro_id, bool async);
-  void try_sx_lock_addr(GlobalAddress lock_addr, uint64_t *buf,
-                        CoroContext *cxt, int coro_id, bool sx_lock);
-  void unlock_sx_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
-                      int coro_id, bool async, bool sx_lock);
-  void write_page_and_unlock(char *page_buffer, GlobalAddress page_addr,
-                             int page_size, uint64_t *cas_buffer,
-                             GlobalAddress lock_addr, uint64_t tag,
-                             CoroContext *cxt, int coro_id, bool async,
-                             bool sx_lock);
-  void lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
-                          int page_size, uint64_t *cas_buffer,
-                          GlobalAddress lock_addr, uint64_t tag,
-                          CoroContext *cxt, int coro_id, bool sx_lock);
-  void batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
-                                int page_size, uint64_t *cas_buffer,
-                                GlobalAddress lock_addr, uint64_t tag,
-                                CoroContext *cxt, int coro_id, bool sx_lock);
-
-  bool page_search(GlobalAddress page_addr, const Key &k, SearchResult &result,
-                   CoroContext *cxt, int coro_id, bool from_cache = false);
-  void internal_page_search(InternalPage *page, const Key &k,
-                            SearchResult &result);
-  void leaf_page_search(LeafPage *page, const Key &k, SearchResult &result);
-
-  void internal_page_store(GlobalAddress page_addr, const Key &k,
-                           GlobalAddress value, GlobalAddress root, int level,
-                           CoroContext *cxt, int coro_id);
-  bool leaf_page_store(GlobalAddress page_addr, const Key &k, const Value &v,
-                       GlobalAddress root, int level, CoroContext *cxt,
-                       int coro_id, bool from_cache = false,
-                       bool sx_lock = false);
-  bool leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
-                     CoroContext *cxt, int coro_id, bool from_cache = false);
-
-  bool acquire_local_lock(GlobalAddress lock_addr, CoroContext *cxt,
-                          int coro_id);
-  bool can_hand_over(GlobalAddress lock_addr);
-  void releases_local_lock(GlobalAddress lock_addr);
+  SearchResult() = default;
+  void clear() {
+    memset(this, 0, sizeof(SearchResult));
+  }
 };
 
 class Header {
-private:
+//  private:
+ public:
   GlobalAddress leftmost_ptr;
   GlobalAddress sibling_ptr;
   Key lowest;
   Key highest;
-  uint16_t level;
-  int16_t last_index;
+  // uint16_t level;
+  uint8_t hash_offset;  // in leaf node
+  uint8_t level;
+  // int16_t last_index;
+  int8_t cnt;
+  int8_t last_index;
 
   friend class InternalPage;
   friend class LeafPage;
   friend class Tree;
   friend class IndexCache;
 
-public:
+ public:
   Header() {
     leftmost_ptr = GlobalAddress::Null();
     sibling_ptr = GlobalAddress::Null();
+    hash_offset = 0;
+    cnt = 0;
     last_index = -1;
     lowest = kKeyMin;
     highest = kKeyMax;
@@ -198,10 +102,10 @@ public:
               << "range=[" << lowest << " - " << highest << "]";
   }
 } __attribute__((packed));
-;
+
 
 class InternalEntry {
-public:
+ public:
   Key key;
   GlobalAddress ptr;
 
@@ -212,15 +116,15 @@ public:
 } __attribute__((packed));
 
 class LeafEntry {
-public:
-  uint8_t f_version : 4;
+ public:
+  // uint8_t f_version : 4;
   Key key;
   Value value;
-  uint8_t r_version : 4;
+  // uint8_t r_version : 4;
 
   LeafEntry() {
-    f_version = 0;
-    r_version = 0;
+    // f_version = 0;
+    // r_version = 0;
     value = kValueNull;
     key = 0;
   }
@@ -230,9 +134,16 @@ constexpr int kInternalCardinality = (kInternalPageSize - sizeof(Header) -
                                       sizeof(uint8_t) * 2 - sizeof(uint64_t)) /
                                      sizeof(InternalEntry);
 
-constexpr int kLeafCardinality =
-    (kLeafPageSize - sizeof(Header) - sizeof(uint8_t) * 2 - sizeof(uint64_t)) /
-    sizeof(LeafEntry);
+// constexpr int kLeafCardinality =
+//     (kLeafPageSize - sizeof(Header) - sizeof(uint8_t) * 2 - sizeof(uint64_t)) /
+//     sizeof(LeafEntry);
+constexpr int kAssociativity = 4;
+constexpr int kNumBucket = 10;
+constexpr int kGroupSize = kAssociativity * 3;
+constexpr int kLeafCardinality = kNumBucket * kAssociativity / 2 * 3;
+
+// constexpr int kLeafPosBaseMax = kLeafCardinality - NUM_LINEAR_PROBING + 1;
+
 
 class InternalPage {
 // private:
@@ -352,17 +263,46 @@ public:
 #endif
   }
 
-  bool check_consistent() const {
+  void update_hash_offset() {
+    hdr.hash_offset = (hdr.hash_offset + 2) % kNumBucket;
+  }
 
+  bool insert_for_split(const Key &k, const Value &v, int bucket_id) {
+    int pos_start, overflow_start;
+    if (bucket_id % 2) {
+      pos_start = (bucket_id / 2) * kGroupSize + kAssociativity * 2;
+      overflow_start = pos_start - kAssociativity;
+    } else {
+      pos_start = (bucket_id / 2) * kGroupSize;
+      overflow_start = pos_start + kAssociativity;
+    }
+    for (int i = pos_start; i < pos_start + kAssociativity; ++i) {
+      assert(records[i].key != k);
+      if (records[i].value == kValueNull) {
+        records[i].key = k;
+        records[i].value = v;
+        return true;
+      }
+    }
+    for (int i = overflow_start; i < overflow_start + kAssociativity; ++i) {
+      assert(records[i].key != k);
+      if (records[i].value == kValueNull) {
+        records[i].key = k;
+        records[i].value = v;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool check_consistent() const {
     bool succ = true;
 #ifdef CONFIG_ENABLE_CRC
     auto cal_crc =
         CityHash32((char *)&front_version, (&rear_version) - (&front_version));
     succ = cal_crc == this->crc;
 #endif
-
     succ = succ && (rear_version == front_version);
-
     return succ;
   }
 
@@ -374,5 +314,131 @@ public:
   }
 
 } __attribute__((packed));
+
+
+class Tree {
+
+public:
+  Tree(DSM *dsm, uint16_t tree_id = 0);
+
+  void insert(const Key &k, const Value &v, CoroContext *cxt = nullptr,
+              int coro_id = 0);
+  bool search(const Key &k, Value &v, CoroContext *cxt = nullptr,
+              int coro_id = 0);
+  void del(const Key &k, CoroContext *cxt = nullptr, int coro_id = 0);
+
+  uint64_t range_query(const Key &from, const Key &to, Value *buffer,
+                       CoroContext *cxt = nullptr, int coro_id = 0);
+
+  void print_and_check_tree(CoroContext *cxt = nullptr, int coro_id = 0);
+
+  void run_coroutine(CoroFunc func, int id, int coro_cnt, bool lock_bench);
+
+  void lock_bench(const Key &k, CoroContext *cxt = nullptr, int coro_id = 0);
+
+  void index_cache_statistics();
+  void clear_statistics();
+
+private:
+  DSM *dsm;
+  uint64_t tree_id;
+  GlobalAddress root_ptr_ptr; // the address which stores root pointer;
+
+  // static thread_local int coro_id;
+  static thread_local CoroCall worker[define::kMaxCoro];
+  static thread_local CoroCall master;
+
+  LocalLockNode *local_locks[MAX_MACHINE];
+
+  IndexCache *index_cache;
+
+  void print_verbose();
+
+  void before_operation(CoroContext *cxt, int coro_id);
+
+  GlobalAddress get_root_ptr_ptr();
+  GlobalAddress get_root_ptr(CoroContext *cxt, int coro_id);
+
+  void coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
+                   bool lock_bench);
+  void coro_master(CoroYield &yield, int coro_cnt);
+
+  void broadcast_new_root(GlobalAddress new_root_addr, int root_level);
+  bool update_new_root(GlobalAddress left, const Key &k, GlobalAddress right,
+                       int level, GlobalAddress old_root, CoroContext *cxt,
+                       int coro_id);
+
+  void insert_internal_update_left_child(const Key &k, GlobalAddress v,
+                                         const Key &left_child,
+                                         GlobalAddress left_child_val,
+                                         CoroContext *cxt, int coro_id,
+                                         int level);
+
+  bool try_lock_addr(GlobalAddress lock_addr, uint64_t tag, uint64_t *buf,
+                     CoroContext *cxt, int coro_id);
+  void unlock_addr(GlobalAddress lock_addr, uint64_t tag, uint64_t *buf,
+                   CoroContext *cxt, int coro_id, bool async);
+  bool try_x_lock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                       int coro_id);
+  void unlock_x_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                     int coro_id, bool async);
+  bool try_s_lock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                       int coro_id);
+  void unlock_s_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                     int coro_id, bool async);
+  void try_sx_lock_addr(GlobalAddress lock_addr, uint64_t *buf,
+                        CoroContext *cxt, int coro_id, bool sx_lock);
+  void unlock_sx_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                      int coro_id, bool async, bool sx_lock);
+  void write_page_and_unlock(char *page_buffer, GlobalAddress page_addr,
+                             int page_size, uint64_t *cas_buffer,
+                             GlobalAddress lock_addr, uint64_t tag,
+                             CoroContext *cxt, int coro_id, bool async,
+                             bool sx_lock);
+  void lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
+                          int page_size, uint64_t *cas_buffer,
+                          GlobalAddress lock_addr, uint64_t tag,
+                          CoroContext *cxt, int coro_id, bool sx_lock);
+  void batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
+                                int page_size, uint64_t *cas_buffer,
+                                GlobalAddress lock_addr, uint64_t tag,
+                                CoroContext *cxt, int coro_id, bool sx_lock);
+
+  bool page_search(GlobalAddress page_addr, int level_hint, const Key &k,
+                   SearchResult &result, CoroContext *cxt, int coro_id,
+                   bool from_cache = false);
+  void internal_page_search(InternalPage *page, const Key &k,
+                            SearchResult &result);
+  void leaf_page_search(LeafPage *page, const Key &k, SearchResult &result);
+  bool try_group_search(LeafEntry *records, const Key &k, SearchResult &result);
+
+  void internal_page_store(GlobalAddress page_addr, const Key &k,
+                           GlobalAddress value, GlobalAddress root, int level,
+                           CoroContext *cxt, int coro_id);
+  void internal_page_store_update_left_child(GlobalAddress page_addr,
+                                             const Key &k, GlobalAddress value,
+                                             const Key &left_child,
+                                             GlobalAddress left_child_val,
+                                             GlobalAddress root, int level,
+                                             CoroContext *cxt, int coro_id);
+  bool leaf_page_store(GlobalAddress page_addr, const Key &k, const Value &v,
+                       GlobalAddress root, int level, uint64_t hash_offset,
+                       CoroContext *cxt, int coro_id, bool from_cache = false,
+                       bool sx_lock = false);
+  bool leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
+                     CoroContext *cxt, int coro_id, bool from_cache = false);
+
+  bool acquire_local_lock(GlobalAddress lock_addr, CoroContext *cxt,
+                          int coro_id);
+  bool can_hand_over(GlobalAddress lock_addr);
+  void releases_local_lock(GlobalAddress lock_addr);
+
+  // int key_hash_pos(const Key &k, uint64_t page_hash, uint64_t hash_offset) {
+  //   return (k + page_hash + hash_offset) % kLeafPosBaseMax;
+  // }
+  int key_hash_bucket(const Key &k, uint64_t hash_offset) {
+    return (k + hash_offset) % kNumBucket;
+  }
+};
 
 #endif // _TREE_H_
