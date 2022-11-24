@@ -74,9 +74,8 @@ class Header {
   // uint16_t level;
   uint8_t hash_offset;  // in leaf node
   uint8_t level;
-  // int16_t last_index;
-  int8_t cnt;
-  int8_t last_index;
+  int16_t last_index;
+  // int8_t cnt;
 
   friend class InternalPage;
   friend class LeafPage;
@@ -88,7 +87,6 @@ class Header {
     leftmost_ptr = GlobalAddress::Null();
     sibling_ptr = GlobalAddress::Null();
     hash_offset = 0;
-    cnt = 0;
     last_index = -1;
     lowest = kKeyMin;
     highest = kKeyMax;
@@ -374,10 +372,10 @@ private:
                                          CoroContext *cxt, int coro_id,
                                          int level);
 
-  bool try_lock_addr(GlobalAddress lock_addr, uint64_t tag, uint64_t *buf,
-                     CoroContext *cxt, int coro_id);
-  void unlock_addr(GlobalAddress lock_addr, uint64_t tag, uint64_t *buf,
-                   CoroContext *cxt, int coro_id, bool async);
+  bool try_lock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                     int coro_id);
+  void unlock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
+                   int coro_id, bool async);
   bool try_x_lock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
                        int coro_id);
   void unlock_x_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *cxt,
@@ -392,17 +390,16 @@ private:
                       int coro_id, bool async, bool sx_lock);
   void write_page_and_unlock(char *page_buffer, GlobalAddress page_addr,
                              int page_size, uint64_t *cas_buffer,
-                             GlobalAddress lock_addr, uint64_t tag,
-                             CoroContext *cxt, int coro_id, bool async,
-                             bool sx_lock);
-  void lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
-                          int page_size, uint64_t *cas_buffer,
-                          GlobalAddress lock_addr, uint64_t tag,
-                          CoroContext *cxt, int coro_id, bool sx_lock);
+                             GlobalAddress lock_addr, CoroContext *cxt,
+                             int coro_id, bool async, bool sx_lock);
   void batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
                                 int page_size, uint64_t *cas_buffer,
-                                GlobalAddress lock_addr, uint64_t tag,
-                                CoroContext *cxt, int coro_id, bool sx_lock);
+                                GlobalAddress lock_addr, CoroContext *cxt,
+                                int coro_id, bool sx_lock);
+  void lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
+                          int page_size, uint64_t *cas_buffer,
+                          GlobalAddress lock_addr, CoroContext *cxt,
+                          int coro_id, bool sx_lock);
 
   bool page_search(GlobalAddress page_addr, int level_hint, const Key &k,
                    SearchResult &result, CoroContext *cxt, int coro_id,
@@ -421,6 +418,10 @@ private:
                                              GlobalAddress left_child_val,
                                              GlobalAddress root, int level,
                                              CoroContext *cxt, int coro_id);
+  bool try_leaf_page_update(GlobalAddress page_addr, GlobalAddress lock_addr,
+                            const Key &k, const Value &v, uint64_t hash_offset,
+                            CoroContext *cxt, int coro_id,
+                            bool sx_lock = false);
   bool leaf_page_store(GlobalAddress page_addr, const Key &k, const Value &v,
                        GlobalAddress root, int level, uint64_t hash_offset,
                        CoroContext *cxt, int coro_id, bool from_cache = false,
