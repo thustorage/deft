@@ -1,18 +1,16 @@
 #include "Directory.h"
 #include "Common.h"
 
-#include "Connection.h"
+#include "connection.h"
+#include "DirectoryConnection.h"
 
 GlobalAddress g_root_ptr = GlobalAddress::Null();
 int g_root_level = -1;
-bool enable_cache;
+bool enable_cache = true;
 
-Directory::Directory(DirectoryConnection *dCon, RemoteConnection *remoteInfo,
-                     uint32_t machineNR, uint16_t dirID, uint16_t nodeID)
-    : dCon(dCon), remoteInfo(remoteInfo), machineNR(machineNR), dirID(dirID),
-      nodeID(nodeID), dirTh(nullptr) {
-
-  { // chunck alloctor
+Directory::Directory(DirectoryConnection *dCon, uint16_t dirID, uint16_t nodeID)
+    : dCon(dCon), dirID(dirID), nodeID(nodeID), dirTh(nullptr) {
+  {  // chunck alloctor
     GlobalAddress dsm_start;
     uint64_t per_directory_dsm_size = dCon->dsmSize / NR_DIRECTORY;
     dsm_start.nodeID = nodeID;

@@ -17,11 +17,12 @@ const int kCoroCnt = 3;
 
 // #define BENCH_LOCK
 
-int kReadRatio;
+int kServerCount;
+int kClientCount;
 int kThreadCount;
-int kNodeCount;
+int kReadRatio;
 uint64_t kKeySpace = 128 * define::MB;
-double kWarmRatio = 0.8;
+double kWarmRatio = 1;
 double zipfan = 0;
 
 //////////////////// workload parameters /////////////////////
@@ -33,7 +34,7 @@ uint64_t tp[MAX_APP_THREAD][8];
 uint64_t latency_th_all[LATENCY_WINDOWS];
 
 Tree *tree;
-DSM *dsm;
+DSMClient *dsm_client;
 
 inline Key to_key(uint64_t k) {
   return (CityHash64((char *)&k, sizeof(k)) + 1) % kKeySpace;
@@ -42,8 +43,8 @@ inline Key to_key(uint64_t k) {
 class RequsetGenBench : public RequstGen {
 
 public:
-  RequsetGenBench(int coro_id, DSM *dsm, int id)
-      : coro_id(coro_id), dsm(dsm), id(id) {
+  RequsetGenBench(int coro_id, DSMClient *dsm_client, int id)
+      : coro_id(coro_id), dsm_client_(dsm_client), id(id) {
     seed = rdtsc();
     // mehcached_zipf_init(&state, kKeySpace, zipfan,
     //                     (rdtsc() & (0x0000ffffffffffffull)) ^ id);
@@ -65,15 +66,15 @@ public:
 
 private:
   int coro_id;
-  DSM *dsm;
+  DSMClient *dsm_client_;
   int id;
 
   unsigned int seed;
   struct zipf_gen_state state;
 };
 
-RequstGen *coro_func(int coro_id, DSM *dsm, int id) {
-  return new RequsetGenBench(coro_id, dsm, id);
+RequstGen *coro_func(int coro_id, DSMClient *dsm_client, int id) {
+  return new RequsetGenBench(coro_id, dsm_client, id);
 }
 
 Timer bench_timer;
@@ -83,11 +84,11 @@ void thread_run(int id) {
 
   // bindCore(id);
 
-  dsm->registerThread();
+  dsm_client->RegisterThread();
 
 #ifndef BENCH_LOCK
-  uint64_t all_thread = kThreadCount * dsm->getClusterSize();
-  uint64_t my_id = kThreadCount * dsm->getMyNodeID() + id;
+  uint64_t all_thread = kThreadCount * dsm_client->get_client_size();
+  uint64_t my_id = kThreadCount * dsm_client->get_my_client_id() + id;
 
   printf("I am thread %ld on compute nodes\n", my_id);
 
@@ -111,8 +112,8 @@ void thread_run(int id) {
   if (id == 0) {
     while (warmup_cnt.load() != kThreadCount)
       ;
-    printf("node %d finish\n", dsm->getMyNodeID());
-    dsm->barrier("warm_finish");
+    printf("node %d finish\n", dsm_client->get_my_client_id());
+    // dsm->barrier("warm_finish");
 
     uint64_t ns = bench_timer.end();
     printf("warmup time %lds\n", ns / 1000 / 1000 / 1000);
@@ -181,18 +182,23 @@ void thread_run(int id) {
 }
 
 void parse_args(int argc, char *argv[]) {
-  if (argc < 5) {
-    printf("Usage: ./benchmark kNodeCount kReadRatio kThreadCount kZipf\n");
+  if (argc < 6) {
+    printf(
+        "Usage: ./client kServerCount kClientCount kThreadCount kReadRatio "
+        "kZipf\n");
     exit(-1);
   }
 
-  kNodeCount = atoi(argv[1]);
-  kReadRatio = atoi(argv[2]);
+  kServerCount = atoi(argv[1]);
+  kClientCount = atoi(argv[2]);
   kThreadCount = atoi(argv[3]);
-  zipfan = atof(argv[4]);
+  kReadRatio = atoi(argv[4]);
+  zipfan = atof(argv[5]);
 
-  printf("kNodeCount %d, kReadRatio %d, kThreadCount %d Zipfan %.3lf\n",
-         kNodeCount, kReadRatio, kThreadCount, zipfan);
+  printf(
+      "kServerCount %d, kClientCount %d, kThreadCount %d, kReadRatio %d, "
+      "Zipfan %.3lf\n",
+      kServerCount, kClientCount, kThreadCount, kReadRatio, zipfan);
 }
 
 void cal_latency() {
@@ -244,14 +250,15 @@ int main(int argc, char *argv[]) {
   parse_args(argc, argv);
 
   DSMConfig config;
-  config.machineNR = kNodeCount;
-  dsm = DSM::getInstance(config);
+  config.num_server = kServerCount;
+  config.num_client = kClientCount;
+  dsm_client = DSMClient::GetInstance(config);
 
-  dsm->registerThread();
-  tree = new Tree(dsm);
+  dsm_client->RegisterThread();
+  tree = new Tree(dsm_client);
 
 #ifndef BENCH_LOCK
-  if (dsm->getMyNodeID() == 0) {
+  if (dsm_client->get_my_client_id() == 0) {
     tree->insert(to_key(0), 1);
     for (uint64_t i = 1; i < 1024000; ++i) {
       tree->insert(to_key(i), i * 2);
@@ -259,8 +266,9 @@ int main(int argc, char *argv[]) {
   }
 #endif
 
-  dsm->barrier("benchmark");
-  dsm->resetThread();
+  // dsm->barrier("benchmark");
+  dsm_client->Barrier("benchmark");
+  dsm_client->ResetThread();
 
   for (int i = 0; i < kThreadCount; i++) {
     th[i] = std::thread(thread_run, i);
@@ -319,20 +327,24 @@ int main(int argc, char *argv[]) {
     // }
 
     double per_node_tp = cap * 1.0 / microseconds;
-    uint64_t cluster_tp = dsm->sum((uint64_t)(per_node_tp * 1000));
+    // uint64_t cluster_tp = dsm->sum((uint64_t)(per_node_tp * 1000));
+    uint64_t cluster_tp = dsm_client->Sum((uint64_t)(per_node_tp * 1000));
 
-    printf("%d, throughput %.4f\n", dsm->getMyNodeID(), per_node_tp);
+    printf("%d, throughput %.4f\n", dsm_client->get_my_client_id(),
+           per_node_tp);
 
-    if (dsm->getMyNodeID() == 0) {
+    if (dsm_client->get_my_client_id() == 0) {
       printf("cluster throughput %.3f\n", cluster_tp / 1000.0);
       printf("cache hit rate: %lf\n", hit * 1.0 / all);
-      printf("%d avg op latency: %.1lf\n", dsm->getMyNodeID(),
+      printf("%d avg op latency: %.1lf\n", dsm_client->get_my_client_id(),
              (double)stat_lat[lat_op] / stat_cnt[lat_op]);
-      printf("%d avg lock latency: %.1lf\n", dsm->getMyNodeID(),
+      printf("%d avg lock latency: %.1lf\n", dsm_client->get_my_client_id(),
              (double)stat_lat[lat_lock] / stat_cnt[lat_lock]);
-      printf("%d avg read page latency: %.1lf\n", dsm->getMyNodeID(),
+      printf("%d avg read page latency: %.1lf\n",
+             dsm_client->get_my_client_id(),
              (double)stat_lat[lat_read_page] / stat_cnt[lat_read_page]);
-      printf("%d avg write page latency: %.1lf\n", dsm->getMyNodeID(),
+      printf("%d avg write page latency: %.1lf\n",
+             dsm_client->get_my_client_id(),
              (double)stat_lat[lat_write_page] / stat_cnt[lat_write_page]);
     }
   }

@@ -10,15 +10,15 @@ public:
   CacheConfig(uint32_t cacheSize = 1) : cacheSize(cacheSize) {}
 };
 
-class DSMConfig {
-public:
-  CacheConfig cacheConfig;
-  uint32_t machineNR;
-  uint64_t dsmSize; // G
+struct DSMConfig {
+  // CacheConfig cacheConfig;
+  // uint32_t machineNR;
+  // uint64_t dsmSize;  // G
 
-  DSMConfig(const CacheConfig &cacheConfig = CacheConfig(),
-            uint32_t machineNR = 2, uint64_t dsmSize = 8)
-      : cacheConfig(cacheConfig), machineNR(machineNR), dsmSize(dsmSize) {}
+  uint32_t dsm_size = 8;    // G
+  uint32_t cache_size = 1;  // G
+  uint32_t num_client = 1;
+  uint32_t num_server = 1;
 };
 
 #endif /* __CONFIG_H__ */

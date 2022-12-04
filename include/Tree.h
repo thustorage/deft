@@ -1,7 +1,8 @@
 #if !defined(_TREE_H_)
 #define _TREE_H_
 
-#include "DSM.h"
+// #include "DSM.h"
+#include "dsm_client.h"
 #include <atomic>
 #include <city.h>
 #include <functional>
@@ -48,12 +49,12 @@ public:
   virtual Request next() { return Request{}; }
 };
 
-using CoroFunc = std::function<RequstGen *(int, DSM *, int)>;
+using CoroFunc = std::function<RequstGen *(int, DSMClient *, int)>;
 
 struct SearchResult {
   bool is_leaf;
   uint8_t level;
-  GlobalAddress slibing;
+  GlobalAddress sibling;
   GlobalAddress next_level;
   Value val;
   Key other_in_group = 0;
@@ -74,7 +75,9 @@ class Header {
   // uint16_t level;
   uint8_t hash_offset;  // in leaf node
   uint8_t level;
-  int16_t last_index;
+  // int16_t last_index;
+  int8_t last_index;
+  int8_t is_root;
   // int8_t cnt;
 
   friend class InternalPage;
@@ -88,6 +91,7 @@ class Header {
     sibling_ptr = GlobalAddress::Null();
     hash_offset = 0;
     last_index = -1;
+    is_root = false;
     lowest = kKeyMin;
     highest = kKeyMax;
   }
@@ -317,7 +321,7 @@ public:
 class Tree {
 
 public:
-  Tree(DSM *dsm, uint16_t tree_id = 0);
+  Tree(DSMClient *dsm, uint16_t tree_id = 0);
 
   void insert(const Key &k, const Value &v, CoroContext *cxt = nullptr,
               int coro_id = 0);
@@ -338,7 +342,7 @@ public:
   void clear_statistics();
 
 private:
-  DSM *dsm;
+  DSMClient *dsm_client_;
   uint64_t tree_id;
   GlobalAddress root_ptr_ptr; // the address which stores root pointer;
 
@@ -355,13 +359,14 @@ private:
   void before_operation(CoroContext *cxt, int coro_id);
 
   GlobalAddress get_root_ptr_ptr();
-  GlobalAddress get_root_ptr(CoroContext *cxt, int coro_id);
+  GlobalAddress get_root_ptr(CoroContext *cxt, int coro_id,
+                             bool force_read = false);
 
   void coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
                    bool lock_bench);
   void coro_master(CoroYield &yield, int coro_cnt);
 
-  void broadcast_new_root(GlobalAddress new_root_addr, int root_level);
+  // void broadcast_new_root(GlobalAddress new_root_addr, int root_level);
   bool update_new_root(GlobalAddress left, const Key &k, GlobalAddress right,
                        int level, GlobalAddress old_root, CoroContext *cxt,
                        int coro_id);

@@ -4,7 +4,7 @@
 #include "Common.h"
 #include "RawMessageConnection.h"
 
-struct RemoteConnection;
+struct RemoteConnectionToServer;
 
 // app thread
 struct ThreadConnection {
@@ -22,10 +22,10 @@ struct ThreadConnection {
   ibv_mr *cacheMR;
   void *cachePool;
   uint32_t cacheLKey;
-  RemoteConnection *remoteInfo;
+  RemoteConnectionToServer *conn_to_server;
 
   ThreadConnection(uint16_t threadID, void *cachePool, uint64_t cacheSize,
-                   uint32_t machineNR, RemoteConnection *remoteInfo);
+                   uint32_t machineNR, RemoteConnectionToServer *remote_conn);
 
   void sendMessage2Dir(RawMessage *m, uint16_t node_id, uint16_t dir_id = 0);
 };

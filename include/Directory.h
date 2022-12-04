@@ -7,22 +7,22 @@
 
 #include "Common.h"
 
-#include "Connection.h"
+#include "connection.h"
+#include "RawMessageConnection.h"
 #include "GlobalAllocator.h"
 
+struct DirectoryConnection;
 
 class Directory {
-public:
-  Directory(DirectoryConnection *dCon, RemoteConnection *remoteInfo,
-            uint32_t machineNR, uint16_t dirID, uint16_t nodeID);
+ public:
+  Directory(DirectoryConnection *dCon, uint16_t dirID, uint16_t nodeID);
 
   ~Directory();
 
-private:
+ private:
   DirectoryConnection *dCon;
-  RemoteConnection *remoteInfo;
 
-  uint32_t machineNR;
+  // uint32_t machineNR;
   uint16_t dirID;
   uint16_t nodeID;
 
@@ -32,10 +32,9 @@ private:
 
   void dirThread();
 
-  void sendData2App(const RawMessage *m);
+  // void sendData2App(const RawMessage *m);
 
   void process_message(const RawMessage *m);
-
 };
 
 #endif /* __DIRECTORY_H__ */

@@ -7,10 +7,10 @@ class GlobalAddress {
  public:
   union {
     struct {
-      // uint64_t nodeID: 16;
-      uint64_t hash_offset : 8;  // leaf node's hash offset
-      uint64_t nodeID : 8;
       uint64_t offset : 48;
+      // uint64_t nodeID: 16;
+      uint64_t nodeID : 8;
+      uint64_t hash_offset : 8;  // leaf node's hash offset
     };
     uint64_t val;
   };

@@ -13,7 +13,7 @@ int main() {
 
   Value v;
 
-  if (dsm->getMyNodeID() != 0) {
+  if (dsm->getMyClientID() != 0) {
     while (true)
       ;
   }

@@ -4,7 +4,7 @@
 #include "Common.h"
 #include "RawMessageConnection.h"
 
-struct RemoteConnection;
+struct RemoteConnectionToClient;
 
 // directory thread
 struct DirectoryConnection {
@@ -27,10 +27,10 @@ struct DirectoryConnection {
   uint64_t lockSize;
   uint32_t lockLKey;
 
-  RemoteConnection *remoteInfo;
+  RemoteConnectionToClient *remote_con_;
 
   DirectoryConnection(uint16_t dirID, void *dsmPool, uint64_t dsmSize,
-                      uint32_t machineNR, RemoteConnection *remoteInfo);
+                      uint32_t machineNR, RemoteConnectionToClient *remote_con);
 
   void sendMessage2App(RawMessage *m, uint16_t node_id, uint16_t th_id);
 };

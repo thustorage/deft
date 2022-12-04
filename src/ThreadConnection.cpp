@@ -1,11 +1,11 @@
 #include "ThreadConnection.h"
 
-#include "Connection.h"
+#include "connection.h"
 
 ThreadConnection::ThreadConnection(uint16_t threadID, void *cachePool,
                                    uint64_t cacheSize, uint32_t machineNR,
-                                   RemoteConnection *remoteInfo)
-    : threadID(threadID), remoteInfo(remoteInfo) {
+                                   RemoteConnectionToServer *remote_conn)
+    : threadID(threadID), conn_to_server(remote_conn) {
   createContext(&ctx);
 
   cq = ibv_create_cq(ctx.ctx, RAW_RECV_CQ_COUNT, NULL, NULL, 0);
@@ -29,7 +29,7 @@ ThreadConnection::ThreadConnection(uint16_t threadID, void *cachePool,
 
 void ThreadConnection::sendMessage2Dir(RawMessage *m, uint16_t node_id,
                                        uint16_t dir_id) {
-  
-  message->sendRawMessage(m, remoteInfo[node_id].dirMessageQPN[dir_id],
-                          remoteInfo[node_id].appToDirAh[threadID][dir_id]);
+  message->sendRawMessage(
+      m, conn_to_server[node_id].dir_message_qpn[dir_id],
+      conn_to_server[node_id].app_to_dir_ah[threadID][dir_id]);
 }
