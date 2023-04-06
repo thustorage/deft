@@ -23,7 +23,7 @@ int kThreadCount;
 int kReadRatio;
 uint64_t kKeySpace = 128 * define::MB;
 double kWarmRatio = 1;
-double zipfan = 0;
+double zipf = 0;
 
 //////////////////// workload parameters /////////////////////
 
@@ -48,7 +48,7 @@ public:
     seed = rdtsc();
     // mehcached_zipf_init(&state, kKeySpace, zipfan,
     //                     (rdtsc() & (0x0000ffffffffffffull)) ^ id);
-    mehcached_zipf_init(&state, kKeySpace, zipfan, id * 4096 + coro_id);
+    mehcached_zipf_init(&state, kKeySpace, zipf, id * 4096 + coro_id);
   }
 
   Request next() override {
@@ -145,7 +145,7 @@ void thread_run(int id) {
   /// without coro
   unsigned int seed = rdtsc();
   struct zipf_gen_state state;
-  mehcached_zipf_init(&state, kKeySpace, zipfan,
+  mehcached_zipf_init(&state, kKeySpace, zipf,
                       (rdtsc() & (0x0000ffffffffffffull)) ^ id);
 
   Timer timer;
@@ -153,12 +153,12 @@ void thread_run(int id) {
     uint64_t dis = mehcached_zipf_next(&state);
     uint64_t key = to_key(dis);
 
-    Value v;
     timer.begin();
 
 #ifdef BENCH_LOCK
     tree->lock_bench(key);
 #else
+    Value v;
     if (rand_r(&seed) % 100 < kReadRatio) {  // GET
       tree->search(key, v);
     } else {
@@ -193,12 +193,12 @@ void parse_args(int argc, char *argv[]) {
   kClientCount = atoi(argv[2]);
   kThreadCount = atoi(argv[3]);
   kReadRatio = atoi(argv[4]);
-  zipfan = atof(argv[5]);
+  zipf = atof(argv[5]);
 
   printf(
       "kServerCount %d, kClientCount %d, kThreadCount %d, kReadRatio %d, "
       "Zipfan %.3lf\n",
-      kServerCount, kClientCount, kThreadCount, kReadRatio, zipfan);
+      kServerCount, kClientCount, kThreadCount, kReadRatio, zipf);
 }
 
 void cal_latency() {
@@ -306,7 +306,6 @@ int main(int argc, char *argv[]) {
       hit += cache_hit[i][0];
     }
 
-    int lat_end = lat_op + 1;
     uint64_t stat_lat[lat_end];
     uint64_t stat_cnt[lat_end];
     for (int k = 0; k < lat_end; k++) {
@@ -346,6 +345,13 @@ int main(int argc, char *argv[]) {
       printf("%d avg write page latency: %.1lf\n",
              dsm_client->get_my_client_id(),
              (double)stat_lat[lat_write_page] / stat_cnt[lat_write_page]);
+      // printf("%d avg internal page search latency: %.1lf\n",
+      //        dsm_client->get_my_client_id(),
+      //        (double)stat_lat[lat_internal_search] /
+      //            stat_cnt[lat_internal_search]);
+      // printf("%d avg cache search latency: %.1lf\n",
+      //        dsm_client->get_my_client_id(),
+      //        (double)stat_lat[lat_cache_search] / stat_cnt[lat_cache_search]);
     }
   }
 

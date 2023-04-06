@@ -18,6 +18,7 @@
 #define DCT_ACCESS_KEY 3185
 #define UD_PKEY 0x11111111
 #define PSN 3185
+#define MAX_INLINE_DATA 316
 
 constexpr int kOroMax = 3;
 struct RdmaOpRegion {
@@ -66,11 +67,12 @@ ibv_mr *createMemoryRegionOnChip(uint64_t mm, uint64_t mmSize,
 
 bool createQueuePair(ibv_qp **qp, ibv_qp_type mode, ibv_cq *cq,
                      RdmaContext *context, uint32_t qpsMaxDepth = 128,
-                     uint32_t maxInlineData = 0);
+                     uint32_t maxInlineData = MAX_INLINE_DATA);
 
 bool createQueuePair(ibv_qp **qp, ibv_qp_type mode, ibv_cq *send_cq,
                      ibv_cq *recv_cq, RdmaContext *context,
-                     uint32_t qpsMaxDepth = 128, uint32_t maxInlineData = 0);
+                     uint32_t qpsMaxDepth = 128,
+                     uint32_t maxInlineData = MAX_INLINE_DATA);
 
 bool createDCTarget(ibv_exp_dct **dct, ibv_cq *cq, RdmaContext *context,
                     uint32_t qpsMaxDepth = 128, uint32_t maxInlineData = 0);

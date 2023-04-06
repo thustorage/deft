@@ -109,6 +109,25 @@ class Slice {
   // also accepts lowercase (a-f)
   bool DecodeHex(std::string* result) const;
 
+  bool operator==(const Slice &b) const {
+    return ((size_ == b.size_) && (memcmp(data_, b.data_, size_) == 0));
+  }
+
+  bool operator!=(const Slice &b) const {
+    return (size_ != b.size_) || (memcmp(data_, b.data_, size_) != 0);
+  }
+
+  auto operator<=>(const Slice &b) const {
+    assert(data_ != nullptr && b.data_ != nullptr);
+    assert(size_ != 8 && b.size_ != 8);
+    const size_t min_len = (size_ < b.size_) ? size_ : b.size_;
+    int r = memcmp(data_, b.data_, min_len);
+    if (r == 0) {
+      return size_ <=> b.size_;
+    }
+    return r <=> 0;
+  }
+
   // Three-way comparison.  Returns value:
   //   <  0 iff "*this" <  "b",
   //   == 0 iff "*this" == "b",
@@ -145,13 +164,6 @@ struct SliceParts {
   const Slice* parts;
   int num_parts;
 };
-
-inline bool operator==(const Slice& x, const Slice& y) {
-  return ((x.size() == y.size()) &&
-          (memcmp(x.data(), y.data(), x.size()) == 0));
-}
-
-inline bool operator!=(const Slice& x, const Slice& y) { return !(x == y); }
 
 inline int Slice::compare(const Slice& b) const {
   assert(data_ != nullptr && b.data_ != nullptr);

@@ -219,8 +219,9 @@ bool rdmaWrite(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
   wr.wr.rdma.rkey = remoteRKey;
   wr.wr_id = wrID;
 
-  if (ibv_post_send(qp, &wr, &wrBad) != 0) {
-    Debug::notifyError("Send with RDMA_WRITE(WITH_IMM) failed.");
+  int res = ibv_post_send(qp, &wr, &wrBad);
+  if (res != 0) {
+    Debug::notifyError("Send with RDMA_WRITE(WITH_IMM) failed with %d.", res);
     sleep(10);
     return false;
   }

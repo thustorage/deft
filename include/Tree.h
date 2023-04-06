@@ -1,5 +1,4 @@
-#if !defined(_TREE_H_)
-#define _TREE_H_
+#pragma once
 
 // #include "DSM.h"
 #include "dsm_client.h"
@@ -13,7 +12,15 @@ extern uint64_t cache_miss[MAX_APP_THREAD][8];
 extern uint64_t cache_hit[MAX_APP_THREAD][8];
 extern uint64_t latency[MAX_APP_THREAD][LATENCY_WINDOWS];
 
-enum latency_enum { lat_lock, lat_read_page, lat_write_page, lat_op };
+enum latency_enum {
+  lat_lock,
+  lat_read_page,
+  lat_write_page,
+  lat_internal_search,
+  lat_cache_search,
+  lat_op,
+  lat_end
+};
 
 struct alignas(64) StatHelper {
   uint64_t latency_[MAX_APP_THREAD][8];
@@ -68,17 +75,15 @@ struct SearchResult {
 class Header {
 //  private:
  public:
-  GlobalAddress leftmost_ptr;
-  GlobalAddress sibling_ptr;
-  Key lowest;
-  Key highest;
+  GlobalAddress leftmost_ptr = GlobalAddress::Null();
+  GlobalAddress sibling_ptr = GlobalAddress::Null();
+  Key lowest = kKeyMin;
+  Key highest = kKeyMax;
   // uint16_t level;
-  uint8_t hash_offset;  // in leaf node
-  uint8_t level;
-  // int16_t last_index;
-  int8_t last_index;
-  int8_t is_root;
-  // int8_t cnt;
+  uint8_t hash_offset = 0;  // in leaf node
+  uint8_t level = 0;
+  int8_t cnt = 0;
+  int8_t is_root = false;
 
   friend class InternalPage;
   friend class LeafPage;
@@ -86,21 +91,13 @@ class Header {
   friend class IndexCache;
 
  public:
-  Header() {
-    leftmost_ptr = GlobalAddress::Null();
-    sibling_ptr = GlobalAddress::Null();
-    hash_offset = 0;
-    last_index = -1;
-    is_root = false;
-    lowest = kKeyMin;
-    highest = kKeyMax;
-  }
+  Header() {}
 
   void debug() const {
     std::cout << "leftmost=" << leftmost_ptr << ", "
               << "sibling=" << sibling_ptr << ", "
               << "level=" << (int)level << ","
-              << "cnt=" << last_index + 1 << ","
+              << "cnt=" << cnt << ","
               << "range=[" << lowest << " - " << highest << "]";
   }
 } __attribute__((packed));
@@ -175,7 +172,7 @@ public:
     records[0].ptr = right;
     records[1].ptr = GlobalAddress::Null();
 
-    hdr.last_index = 0;
+    hdr.cnt = 1;
 
     front_version = 0;
     rear_version = 0;
@@ -222,7 +219,7 @@ public:
 
   void verbose_debug() const {
     this->debug();
-    for (int i = 0; i < this->hdr.last_index + 1; ++i) {
+    for (int i = 0; i < this->hdr.cnt; ++i) {
       printf("[%lu %lu] ", this->records[i].key, this->records[i].ptr.val);
     }
     printf("\n");
@@ -414,6 +411,8 @@ private:
   void leaf_page_search(LeafPage *page, const Key &k, SearchResult &result);
   bool try_group_search(LeafEntry *records, const Key &k, SearchResult &result);
 
+  void internal_page_split(InternalPage *page, InternalPage *sibling,
+                           GlobalAddress sibling_addr, Key &split_key);
   void internal_page_store(GlobalAddress page_addr, const Key &k,
                            GlobalAddress value, GlobalAddress root, int level,
                            CoroContext *cxt, int coro_id);
@@ -446,5 +445,3 @@ private:
     return (k + hash_offset) % kNumBucket;
   }
 };
-
-#endif // _TREE_H_

@@ -1,15 +1,16 @@
 #include "Tree.h"
-#include "IndexCache.h"
-#include "RdmaBuffer.h"
-#include "Timer.h"
 
-#include <algorithm>
 #include <city.h>
+#include <stddef.h>
+#include <algorithm>
 #include <iostream>
 #include <queue>
 #include <utility>
 #include <vector>
-#include <stddef.h>
+
+#include "IndexCache.h"
+#include "RdmaBuffer.h"
+#include "Timer.h"
 
 #define USE_SX_LOCK
 #define BATCH_LOCK_READ
@@ -230,7 +231,6 @@ inline bool Tree::try_lock_addr(GlobalAddress lock_addr, uint64_t *buf,
   // }
 
   {
-
     uint64_t retry_cnt = 0;
     uint64_t pre_tag = 0;
     uint64_t conflict_tag = 0;
@@ -239,9 +239,10 @@ inline bool Tree::try_lock_addr(GlobalAddress lock_addr, uint64_t *buf,
     if (retry_cnt > 1000000) {
       std::cout << "Deadlock " << lock_addr << std::endl;
 
-      std::cout << dsm_client_->get_my_client_id() << ", " << dsm_client_->get_my_thread_id()
-                << " locked by " << (conflict_tag >> 32) << ", "
-                << (conflict_tag << 32 >> 32) << std::endl;
+      std::cout << dsm_client_->get_my_client_id() << ", "
+                << dsm_client_->get_my_thread_id() << " locked by "
+                << (conflict_tag >> 32) << ", " << (conflict_tag << 32 >> 32)
+                << std::endl;
       assert(false);
     }
     auto tag = dsm_client_->get_thread_tag();
@@ -318,7 +319,7 @@ inline bool Tree::try_x_lock_addr(GlobalAddress lock_addr, uint64_t *buf,
       //   assert(false);
       // }
       if (retry_cnt > 1000000) {
-        printf("Deadlock [%lu, %lu]\n", lock_addr.nodeID, lock_addr.offset);
+        printf("Deadlock [%u, %lu]\n", lock_addr.nodeID, lock_addr.offset);
         printf("ori s %u x %u max s %u x %u\n", cur_s_cnt, cur_x_cnt, ori_s_max,
                ori_x_max);
         assert(false);
@@ -379,7 +380,7 @@ inline bool Tree::try_s_lock_addr(GlobalAddress lock_addr, uint64_t *buf,
     uint64_t retry_cnt = 0;
 
   retry:
-    if (cur_x_cnt >= ori_x_max) {
+    if (cur_x_cnt == ori_x_max) {
       // get
     } else {
       retry_cnt++;
@@ -466,7 +467,7 @@ void Tree::write_page_and_unlock(char *page_buffer, GlobalAddress page_addr,
   rs[0].size = page_size;
   rs[0].is_on_chip = false;
 
-  rs[1].source = (uint64_t)dsm->get_rbuf(coro_id).get_cas_buffer();
+  rs[1].source = (uint64_t)dsm_client_->get_rbuf(coro_id).get_cas_buffer();
   rs[1].dest = lock_addr;
   rs[1].size = sizeof(uint64_t);
 
@@ -474,9 +475,9 @@ void Tree::write_page_and_unlock(char *page_buffer, GlobalAddress page_addr,
 
   *(uint64_t *)rs[1].source = 0;
   if (async) {
-    dsm->write_batch(rs, 2, false);
+    dsm_client_->WriteBatch(rs, 2, false);
   } else {
-    dsm->write_batch_sync(rs, 2, cxt);
+    dsm_client_->WriteBatchSync(rs, 2, cxt);
   }
 #endif
   // releases_local_lock(lock_addr);
@@ -531,11 +532,11 @@ void Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
 
   Timer timer;
   timer.begin();
-  
+
   // dsm->faab_read_sync(rs[0], rs[1], add, XS_LOCK_FAA_MASK, cxt);
   dsm_client_->FaaDmBound(lock_addr, add, cas_buffer, XS_LOCK_FAA_MASK, false);
   dsm_client_->ReadSync(page_buffer, page_addr, page_size, cxt);
-  
+
   auto t = timer.end();
   stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t);
 
@@ -548,7 +549,7 @@ void Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
   {
     uint64_t retry_cnt = 0;
   retry:
-    if (sx_lock && cur_x_cnt >= ori_x_max ) {
+    if (sx_lock && cur_x_cnt >= ori_x_max) {
       // ok
     } else if (!sx_lock && cur_x_cnt == ori_x_max && cur_s_cnt == ori_s_max) {
       // ok
@@ -565,7 +566,7 @@ void Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
 
       retry_cnt++;
       if (retry_cnt > 1000000) {
-        printf("Deadlock [%lu, %lu]\n", lock_addr.nodeID, lock_addr.offset);
+        printf("Deadlock [%u, %lu]\n", lock_addr.nodeID, lock_addr.offset);
         printf("ori s %u x %u max s %u x %u\n", cur_s_cnt, cur_x_cnt, ori_s_max,
                ori_x_max);
         assert(false);
@@ -591,7 +592,7 @@ void Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
     uint64_t retry_cnt = 0;
     uint64_t pre_tag = 0;
     uint64_t conflict_tag = 0;
-    auto tag = dsm->getThreadTag();
+    auto tag = dsm_client_->get_thread_tag();
   retry:
     // rs[0].source = (uint64_t)cas_buffer;
     // rs[0].dest = lock_addr;
@@ -606,23 +607,24 @@ void Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
     if (retry_cnt > 1000000) {
       std::cout << "Deadlock " << lock_addr << std::endl;
 
-      std::cout << dsm->getMyClientID() << ", " << dsm->getMyThreadID()
-                << " locked by " << (conflict_tag >> 32) << ", "
-                << (conflict_tag << 32 >> 32) << std::endl;
+      std::cout << dsm_client_->get_my_client_id() << ", "
+                << dsm_client_->get_my_thread_id() << " locked by "
+                << (conflict_tag >> 32) << ", " << (conflict_tag << 32 >> 32)
+                << std::endl;
       assert(false);
     }
 
     Timer timer;
     timer.begin();
 
-    dsm->cas_dm(lock_addr, 0, tag, cas_buffer, false);
-    dsm->read_sync(page_buffer, page_addr, page_size, cxt);
+    dsm_client_->CasDm(lock_addr, 0, tag, cas_buffer, false);
+    dsm_client_->ReadSync(page_buffer, page_addr, page_size, cxt);
     bool res = *(cas_buffer) == 0;
 
     // bool res = dsm->cas_read_sync(rs[0], rs[1], 0, tag, cxt);
 
     auto t = timer.end();
-    stat_helper.add(dsm->getMyThreadID(), lat_read_page, t);
+    stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t);
 
     if (!res) {
       // conflict_tag = *buf - 1;
@@ -638,7 +640,8 @@ void Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
 }
 
 void Tree::lock_bench(const Key &k, CoroContext *cxt, int coro_id) {
-  // uint64_t lock_index = CityHash64((char *)&k, sizeof(k)) % define::kNumOfLock;
+  // uint64_t lock_index = CityHash64((char *)&k, sizeof(k)) %
+  // define::kNumOfLock;
 
   // GlobalAddress lock_addr;
   // lock_addr.nodeID = 0;
@@ -672,9 +675,12 @@ void Tree::lock_bench(const Key &k, CoroContext *cxt, int coro_id) {
   // dsm->read(page_buffer, page_addr, 32, false, cxt);
   // dsm->read_sync(page_buffer, page_addr, kLeafPageSize, cxt);
 
-  lock_and_read_page(page_buffer, page_addr, kLeafPageSize, cas_buffer,
-                     lock_addr, cxt, coro_id, true);
-  unlock_sx_addr(lock_addr, cas_buffer, cxt, coro_id, false, true);
+  write_page_and_unlock(page_buffer, page_addr, 128, cas_buffer, lock_addr, cxt,
+                        coro_id, false, false);
+
+  // lock_and_read_page(page_buffer, page_addr, kLeafPageSize, cas_buffer,
+  //                    lock_addr, cxt, coro_id, true);
+  // unlock_sx_addr(lock_addr, cas_buffer, cxt, coro_id, false, true);
 }
 
 void Tree::insert_internal_update_left_child(const Key &k, GlobalAddress v,
@@ -782,8 +788,8 @@ next:
   bool res = false;
   int cnt = 0;
   while (!res) {
-    if (cnt) {
-      printf("retry insert <k:%lu v:%lu>\n", k, v);
+    if (cnt > 1) {
+      printf("retry insert <k:%lu v:%lu> %d\n", k, v, cnt);
     }
 #ifdef USE_SX_LOCK
     res = leaf_page_store(p, k, v, root, 0, p.hash_offset, cxt, coro_id, false,
@@ -806,6 +812,8 @@ bool Tree::search(const Key &k, Value &v, CoroContext *cxt, int coro_id) {
   bool from_cache = false;
   const CacheEntry *entry = nullptr;
   if (enable_cache) {
+    // Timer timer;
+    // timer.begin();
     GlobalAddress cache_addr;
     entry = index_cache->search_from_cache(
         k, &cache_addr, dsm_client_->get_my_thread_id() == 0);
@@ -818,11 +826,13 @@ bool Tree::search(const Key &k, Value &v, CoroContext *cxt, int coro_id) {
     } else {
       cache_miss[dsm_client_->get_my_thread_id()][0]++;
     }
+    // auto t = timer.end();
+    // stat_helper.add(dsm_client_->get_my_thread_id(), lat_cache_search, t);
   }
 
 next:
   if (!page_search(p, level_hint, k, result, cxt, coro_id, from_cache)) {
-    if (from_cache) { // cache stale
+    if (from_cache) {  // cache stale
       index_cache->invalidate(entry);
       cache_hit[dsm_client_->get_my_thread_id()][0]--;
       cache_miss[dsm_client_->get_my_thread_id()][0]++;
@@ -837,17 +847,17 @@ next:
     goto next;
   }
   if (result.is_leaf) {
-    if (result.val != kValueNull) { // find
+    if (result.val != kValueNull) {  // find
       v = result.val;
       return true;
     }
-    if (result.sibling != GlobalAddress::Null()) { // turn right
+    if (result.sibling != GlobalAddress::Null()) {  // turn right
       p = result.sibling;
       level_hint = 0;
       goto next;
     }
-    return false; // not found
-  } else {        // internal
+    return false;  // not found
+  } else {         // internal
     if (result.sibling != GlobalAddress::Null()) {
       p = result.sibling;
       level_hint = result.level;
@@ -876,7 +886,7 @@ uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
 
   uint64_t counter = 0;
   for (auto page : result) {
-    auto cnt = page->hdr.last_index + 1;
+    auto cnt = page->hdr.cnt;
     auto addr = page->hdr.leftmost_ptr;
 
     // [from, to]
@@ -948,9 +958,8 @@ void Tree::del(const Key &k, CoroContext *cxt, int coro_id) {
     GlobalAddress cache_addr;
     auto entry = index_cache->search_from_cache(
         k, &cache_addr, dsm_client_->get_my_thread_id() == 0);
-    if (entry) { // cache hit
+    if (entry) {  // cache hit
       if (leaf_page_del(cache_addr, k, 0, cxt, coro_id, true)) {
-
         cache_hit[dsm_client_->get_my_thread_id()][0]++;
         return;
       }
@@ -1105,12 +1114,12 @@ re_read:
     }
 
     if (from_cache &&
-        (k < page->hdr.lowest || k >= page->hdr.highest)) { // cache is stale
+        (k < page->hdr.lowest || k >= page->hdr.highest)) {  // cache is stale
       return false;
     }
 
     assert(result.level == 0);
-    if (k >= page->hdr.highest) { // should turn right
+    if (k >= page->hdr.highest) {  // should turn right
       result.sibling = page->hdr.sibling_ptr;
       return true;
     }
@@ -1132,7 +1141,7 @@ re_read:
       index_cache->add_to_cache(page);
     }
 
-    if (k >= page->hdr.highest) { // should turn right
+    if (k >= page->hdr.highest) {  // should turn right
       result.sibling = page->hdr.sibling_ptr;
       return true;
     }
@@ -1143,19 +1152,22 @@ re_read:
       assert(false);
       return false;
     }
+    // Timer timer;
+    // timer.begin();
     internal_page_search(page, k, result);
+    // auto t = timer.end();
+    // stat_helper.add(dsm_client_->get_my_thread_id(), lat_internal_search, t);
   }
 
   return true;
 }
 
-void Tree::internal_page_search(InternalPage *page, const Key &k,
-                                SearchResult &result) {
-
+inline void Tree::internal_page_search(InternalPage *page, const Key &k,
+                                       SearchResult &result) {
   assert(k >= page->hdr.lowest);
   assert(k < page->hdr.highest);
 
-  auto cnt = page->hdr.last_index + 1;
+  auto cnt = page->hdr.cnt;
   // page->debug();
   if (k < page->records[0].key) {
     result.next_level = page->hdr.leftmost_ptr;
@@ -1171,9 +1183,8 @@ void Tree::internal_page_search(InternalPage *page, const Key &k,
   result.next_level = page->records[cnt - 1].ptr;
 }
 
-void Tree::leaf_page_search(LeafPage *page, const Key &k,
-                            SearchResult &result) {
-
+inline void Tree::leaf_page_search(LeafPage *page, const Key &k,
+                                   SearchResult &result) {
   // for (int i = 0; i < kLeafCardinality; ++i) {
   //   auto &r = page->records[i];
   //   if (r.key == k && r.value != kValueNull) {
@@ -1200,8 +1211,8 @@ void Tree::leaf_page_search(LeafPage *page, const Key &k,
   }
 }
 
-bool Tree::try_group_search(LeafEntry *records, const Key &k,
-                            SearchResult &result) {
+inline bool Tree::try_group_search(LeafEntry *records, const Key &k,
+                                   SearchResult &result) {
   for (int i = 0; i < kAssociativity * 2; ++i) {
     if (records[i].value != kValueNull) {
       if (records[i].key == k) {
@@ -1213,6 +1224,32 @@ bool Tree::try_group_search(LeafEntry *records, const Key &k,
     }
   }
   return false;
+}
+
+void Tree::internal_page_split(InternalPage *page, InternalPage *sibling,
+                               GlobalAddress sibling_addr, Key &split_key) {
+  int cnt = kInternalCardinality;
+  int m = cnt / 2;
+  split_key = page->records[m].key;
+  // for (int i = m + 1; i < cnt; ++i) {  // move
+  //   sibling->records[i - m - 1].key = page->records[i].key;
+  //   sibling->records[i - m - 1].ptr = page->records[i].ptr;
+  // }
+  memcpy(sibling->records, page->records + m + 1,
+         (cnt - m - 1) * sizeof(InternalEntry));
+  page->hdr.cnt = m;
+  sibling->hdr.cnt = cnt - m - 1;
+
+  sibling->hdr.leftmost_ptr = page->records[m].ptr;
+  sibling->hdr.lowest = page->records[m].key;
+  sibling->hdr.highest = page->hdr.highest;
+  page->hdr.highest = page->records[m].key;
+
+  // link
+  sibling->hdr.sibling_ptr = page->hdr.sibling_ptr;
+  page->hdr.sibling_ptr = sibling_addr;
+
+  sibling->set_consistent();
 }
 
 void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
@@ -1251,12 +1288,12 @@ void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
   }
   assert(k >= page->hdr.lowest);
 
-  auto cnt = page->hdr.last_index + 1;
+  auto cnt = page->hdr.cnt;
 
   bool is_update = false;
   uint16_t insert_index = 0;
   for (int i = cnt - 1; i >= 0; --i) {
-    if (page->records[i].key == k) { // find and update
+    if (page->records[i].key == k) {  // find and update
       page->records[i].ptr = v;
       // assert(false);
       is_update = true;
@@ -1270,7 +1307,7 @@ void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
 
   assert(cnt != kInternalCardinality);
 
-  if (!is_update) { // insert and shift
+  if (!is_update) {  // insert and shift
     for (int i = cnt; i > insert_index; --i) {
       page->records[i].key = page->records[i - 1].key;
       page->records[i].ptr = page->records[i - 1].ptr;
@@ -1278,43 +1315,19 @@ void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
     page->records[insert_index].key = k;
     page->records[insert_index].ptr = v;
 
-    page->hdr.last_index++;
+    page->hdr.cnt++;
   }
 
-  cnt = page->hdr.last_index + 1;
+  cnt = page->hdr.cnt;
   bool need_split = cnt == kInternalCardinality;
   Key split_key;
   GlobalAddress sibling_addr;
-  if (need_split) { // need split
+  if (need_split) {  // need split
     sibling_addr = dsm_client_->Alloc(kInternalPageSize);
     auto sibling_buf = rbuf.get_sibling_buffer();
-
     auto sibling = new (sibling_buf) InternalPage(page->hdr.level);
 
-    //    std::cout << "addr " <<  sibling_addr << " | level " <<
-    //    (int)(page->hdr.level) << std::endl;
-
-    int m = cnt / 2;
-    split_key = page->records[m].key;
-    assert(split_key > page->hdr.lowest);
-    assert(split_key < page->hdr.highest);
-    for (int i = m + 1; i < cnt; ++i) { // move
-      sibling->records[i - m - 1].key = page->records[i].key;
-      sibling->records[i - m - 1].ptr = page->records[i].ptr;
-    }
-    page->hdr.last_index -= (cnt - m);
-    sibling->hdr.last_index += (cnt - m - 1);
-
-    sibling->hdr.leftmost_ptr = page->records[m].ptr;
-    sibling->hdr.lowest = page->records[m].key;
-    sibling->hdr.highest = page->hdr.highest;
-    page->hdr.highest = page->records[m].key;
-
-    // link
-    sibling->hdr.sibling_ptr = page->hdr.sibling_ptr;
-    page->hdr.sibling_ptr = sibling_addr;
-
-    sibling->set_consistent();
+    internal_page_split(page, sibling, sibling_addr, split_key);
     dsm_client_->WriteSync(sibling_buf, sibling_addr, kInternalPageSize, cxt);
 
     if (root == page_addr) {
@@ -1326,10 +1339,9 @@ void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
   write_page_and_unlock(page_buffer, page_addr, kInternalPageSize, cas_buffer,
                         lock_addr, cxt, coro_id, need_split, false);
 
-  if (!need_split)
-    return;
+  if (!need_split) return;
 
-  if (root == page_addr) { // update root
+  if (root == page_addr) {  // update root
 
     if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
                         cxt, coro_id)) {
@@ -1371,7 +1383,7 @@ void Tree::internal_page_store_update_left_child(
   assert(page->hdr.level == level);
   assert(page->check_consistent());
 
-  auto cnt = page->hdr.last_index + 1;
+  auto cnt = page->hdr.cnt;
 
   if (left_child >= page->hdr.highest) {
 #ifdef USE_SX_LOCK
@@ -1415,7 +1427,7 @@ void Tree::internal_page_store_update_left_child(
   bool is_update = false;
   uint16_t insert_index = 0;
   for (int i = cnt - 1; i >= 0; --i) {
-    if (page->records[i].key == k) { // find and update
+    if (page->records[i].key == k) {  // find and update
       page->records[i].ptr = v;
       // assert(false);
       is_update = true;
@@ -1431,7 +1443,7 @@ void Tree::internal_page_store_update_left_child(
 
   assert(!is_update);
 
-  if (!is_update) { // insert and shift
+  if (!is_update) {  // insert and shift
     for (int i = cnt; i > insert_index; --i) {
       page->records[i].key = page->records[i - 1].key;
       page->records[i].ptr = page->records[i - 1].ptr;
@@ -1448,43 +1460,19 @@ void Tree::internal_page_store_update_left_child(
       page->hdr.leftmost_ptr = left_child_val;
     }
 
-    page->hdr.last_index++;
+    page->hdr.cnt++;
   }
 
-  cnt = page->hdr.last_index + 1;
+  cnt = page->hdr.cnt;
   bool need_split = cnt == kInternalCardinality;
   Key split_key;
   GlobalAddress sibling_addr;
-  if (need_split) { // need split
+  if (need_split) {  // need split
     sibling_addr = dsm_client_->Alloc(kInternalPageSize);
     auto sibling_buf = rbuf.get_sibling_buffer();
-
     auto sibling = new (sibling_buf) InternalPage(page->hdr.level);
 
-    //    std::cout << "addr " <<  sibling_addr << " | level " <<
-    //    (int)(page->hdr.level) << std::endl;
-
-    int m = cnt / 2;
-    split_key = page->records[m].key;
-    assert(split_key > page->hdr.lowest);
-    assert(split_key < page->hdr.highest);
-    for (int i = m + 1; i < cnt; ++i) { // move
-      sibling->records[i - m - 1].key = page->records[i].key;
-      sibling->records[i - m - 1].ptr = page->records[i].ptr;
-    }
-    page->hdr.last_index -= (cnt - m);
-    sibling->hdr.last_index += (cnt - m - 1);
-
-    sibling->hdr.leftmost_ptr = page->records[m].ptr;
-    sibling->hdr.lowest = page->records[m].key;
-    sibling->hdr.highest = page->hdr.highest;
-    page->hdr.highest = page->records[m].key;
-
-    // link
-    sibling->hdr.sibling_ptr = page->hdr.sibling_ptr;
-    page->hdr.sibling_ptr = sibling_addr;
-
-    sibling->set_consistent();
+    internal_page_split(page, sibling, sibling_addr, split_key);
     dsm_client_->WriteSync(sibling_buf, sibling_addr, kInternalPageSize, cxt);
 
     if (root == page_addr) {
@@ -1496,10 +1484,9 @@ void Tree::internal_page_store_update_left_child(
   write_page_and_unlock(page_buffer, page_addr, kInternalPageSize, cas_buffer,
                         lock_addr, cxt, coro_id, need_split, false);
 
-  if (!need_split)
-    return;
+  if (!need_split) return;
 
-  if (root == page_addr) { // update root
+  if (root == page_addr) {  // update root
 
     if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
                         cxt, coro_id)) {
@@ -1744,7 +1731,8 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   // (int)(page->hdr.level) << std::endl;
 
   int cnt = 0;
-  while (tmp_records[cnt].key != 0 && tmp_records[cnt].value != kValueNull) {
+  while (cnt < kLeafCardinality && tmp_records[cnt].key != 0 &&
+         tmp_records[cnt].value != kValueNull) {
     ++cnt;
   }
 
@@ -1753,7 +1741,8 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   assert(split_key > page->hdr.lowest);
   assert(split_key < page->hdr.highest);
 
-  memset(page->records, 0, sizeof(LeafEntry) * kLeafCardinality);
+  memset(reinterpret_cast<void *>(page->records), 0,
+         sizeof(LeafEntry) * kLeafCardinality);
   page->update_hash_offset();
   uint64_t page_new_hash_offset = page->hdr.hash_offset;
   for (int i = 0; i < m; ++i) {
@@ -1765,8 +1754,6 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
     sibling->insert_for_split(tmp_records[i].key, tmp_records[i].value,
                               bucket_id);
   }
-  // page->hdr.last_index -= (cnt - m);
-  // sibling->hdr.last_index += (cnt - m);
 
   sibling->hdr.lowest = split_key;
   sibling->hdr.highest = page->hdr.highest;
@@ -1817,7 +1804,8 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
     internal_page_store_update_left_child(up_level, split_key, sibling_addr,
                                           page->hdr.lowest, page_addr, root,
                                           level + 1, cxt, coro_id);
-    // internal_page_store(up_level, split_key, sibling_addr, root, level + 1, cxt,
+    // internal_page_store(up_level, split_key, sibling_addr, root, level + 1,
+    // cxt,
     //                     coro_id);
   } else {
     assert(from_cache);
@@ -1855,7 +1843,7 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
   assert(page->check_consistent());
 
   if (from_cache &&
-      (k < page->hdr.lowest || k >= page->hdr.highest)) { // cache is stale
+      (k < page->hdr.lowest || k >= page->hdr.highest)) {  // cache is stale
 #ifdef USE_SX_LOCK
     this->unlock_sx_addr(lock_addr, cas_buffer, cxt, coro_id, true, false);
 #else
@@ -1949,13 +1937,11 @@ void Tree::coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
 }
 
 void Tree::coro_master(CoroYield &yield, int coro_cnt) {
-
   for (int i = 0; i < coro_cnt; ++i) {
     yield(worker[i]);
   }
 
   while (true) {
-
     uint64_t next_coro_id;
 
     if (dsm_client_->PollRdmaCqOnce(next_coro_id)) {
@@ -1980,7 +1966,7 @@ inline bool Tree::acquire_local_lock(GlobalAddress lock_addr, CoroContext *cxt,
   uint32_t ticket = lock_val << 32 >> 32;
   uint32_t current = lock_val >> 32;
 
-  while (ticket != current) { // lock failed
+  while (ticket != current) {  // lock failed
 
     if (cxt != nullptr) {
       hot_wait_queue.push(coro_id);
@@ -1996,14 +1982,13 @@ inline bool Tree::acquire_local_lock(GlobalAddress lock_addr, CoroContext *cxt,
 }
 
 inline bool Tree::can_hand_over(GlobalAddress lock_addr) {
-
   auto &node = local_locks[lock_addr.nodeID][lock_addr.offset / 8];
   uint64_t lock_val = node.ticket_lock.load(std::memory_order_relaxed);
 
   uint32_t ticket = lock_val << 32 >> 32;
   uint32_t current = lock_val >> 32;
 
-  if (ticket <= current + 1) { // no pending locks
+  if (ticket <= current + 1) {  // no pending locks
     node.hand_over = false;
   } else {
     node.hand_over = node.hand_time < define::kMaxHandOverTime;
@@ -2023,7 +2008,7 @@ inline void Tree::releases_local_lock(GlobalAddress lock_addr) {
 
 void Tree::index_cache_statistics() {
   index_cache->statistics();
-  index_cache->bench();
+  // index_cache->bench();
 }
 
 void Tree::clear_statistics() {
