@@ -6,7 +6,7 @@
 
 GlobalAddress g_root_ptr = GlobalAddress::Null();
 int g_root_level = -1;
-bool enable_cache = true;
+bool enable_cache = false;
 
 Directory::Directory(DirectoryConnection *dCon, uint16_t dirID, uint16_t nodeID)
     : dCon(dCon), dirID(dirID), nodeID(nodeID), dirTh(nullptr) {
@@ -73,7 +73,7 @@ void Directory::process_message(const RawMessage *m) {
       g_root_ptr = m->addr;
       g_root_level = m->level;
       if (g_root_level >= 3) {
-        enable_cache = true;
+        enable_cache = false;
       }
     }
 

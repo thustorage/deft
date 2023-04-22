@@ -91,8 +91,8 @@ inline const CacheEntry *IndexCache::find_entry(const Key &from) {
 
 inline bool IndexCache::add_to_cache(InternalPage *page) {
   auto new_page = (InternalPage *)malloc(kInternalPageSize);
-  memcpy(new_page, page, sizeof(InternalPage));
-  new_page->index_cache_freq = 0;
+  memcpy(reinterpret_cast<void *>(new_page), page, sizeof(InternalPage));
+  new_page->hdr.index_cache_freq = 0;
 
   if (this->add_entry(page->hdr.lowest, new_page)) {
     skiplist_node_cnt.fetch_add(1);
@@ -124,6 +124,7 @@ inline bool IndexCache::add_to_cache(InternalPage *page) {
 inline const CacheEntry *IndexCache::search_from_cache(const Key &k,
                                                        GlobalAddress *addr,
                                                        bool is_leader) {
+  // TODO: implement Cache!
   // notice: please ensure the thread 0 can make progress
   if (is_leader &&
       !delay_free_list.empty()) {  // try to free a page in the delay-free-list
@@ -143,20 +144,36 @@ inline const CacheEntry *IndexCache::search_from_cache(const Key &k,
   InternalPage *page = entry ? entry->ptr : nullptr;
 
   if (page && k >= page->hdr.lowest && k < page->hdr.highest) {
-    page->index_cache_freq++;
+    page->hdr.index_cache_freq++;
 
-    auto cnt = page->hdr.cnt;
-    if (k < page->records[0].key) {
-      *addr = page->hdr.leftmost_ptr;
+    int group_id = get_key_group(k, page->hdr.lowest, page->hdr.highest);
+    uint8_t cur_group_gran =
+        page->records[kGroupCardinality * (group_id + 1) - 1].ptr.group_gran;
+    int end, group_cnt;
+    if (cur_group_gran == gran_quarter) {
+      end = kGroupCardinality * (group_id + 1);
+      group_cnt = kGroupCardinality;
+    } else if (cur_group_gran == gran_half) {
+      end = group_id < 2 ? kGroupCardinality * 2 : kInternalCardinality;
+      group_cnt = kGroupCardinality * 2;
     } else {
-      int i = 1;
-      for (; i < cnt; ++i) {
-        if (k < page->records[i].key) {
-          break;
-        }
-      }
-      *addr = page->records[i - 1].ptr;
+      assert(cur_group_gran == gran_full);
+      end = kInternalCardinality;
+      group_cnt = kInternalCardinality;
     }
+    InternalEntry *p = page->records + (end - 1);
+    InternalEntry *head = page->records + (end - group_cnt - 1);
+    *addr = GlobalAddress::Null();
+    while (p >= head) {
+      if (p->ptr == GlobalAddress::Null()) {
+        break;
+      } else if (k >= p->key) {
+        *addr = p->ptr;
+        break;
+      }
+      --p;
+    }
+    assert(*addr != GlobalAddress::Null());
 
     // compiler_barrier();
     if (entry->ptr) {  // check if it is freed.
@@ -219,7 +236,7 @@ retry:
     goto retry;
   }
 
-  freq = ptr->index_cache_freq;
+  freq = ptr->hdr.index_cache_freq;
   if (e->ptr != ptr) {
     goto retry;
   }

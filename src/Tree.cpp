@@ -100,7 +100,7 @@ inline void Tree::before_operation(CoroContext *cxt, int coro_id) {
 
 GlobalAddress Tree::get_root_ptr_ptr() {
   GlobalAddress addr;
-  addr.hash_offset = 0;
+  addr.group_node_version = 0;
   addr.nodeID = 0;
   addr.offset =
       define::kRootPointerStoreOffest + sizeof(GlobalAddress) * tree_id;
@@ -147,6 +147,7 @@ bool Tree::update_new_root(GlobalAddress left, const Key &k,
                            GlobalAddress right, int level,
                            GlobalAddress old_root, CoroContext *cxt,
                            int coro_id) {
+  left.group_gran = right.group_gran = gran_full;
   auto page_buffer = dsm_client_->get_rbuf(coro_id).get_page_buffer();
   auto cas_buffer = dsm_client_->get_rbuf(coro_id).get_cas_buffer();
   auto new_root = new (page_buffer) InternalPage(left, k, right, level);
@@ -159,11 +160,16 @@ bool Tree::update_new_root(GlobalAddress left, const Key &k,
   if (dsm_client_->CasSync(root_ptr_ptr, old_root, new_root_addr, cas_buffer,
                            cxt)) {
     // broadcast_new_root(new_root_addr, level);
-    std::cout << "new root level " << level << " " << new_root_addr
-              << std::endl;
+    printf("new root level %d [%d, %ld]\n", level, new_root_addr.nodeID,
+           new_root_addr.offset);
+    g_root_ptr = new_root_addr;
     return true;
   } else {
-    std::cout << "cas root fail " << std::endl;
+    printf(
+        "cas root fail: left [%d,%lu] right [%d,%lu] old root [%d,%lu] try new "
+        "root [%d,%lu]\n",
+        left.nodeID, left.offset, right.nodeID, right.offset, old_root.nodeID,
+        old_root.offset, new_root_addr.nodeID, new_root_addr.offset);
   }
 
   return false;
@@ -549,7 +555,7 @@ void Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
   {
     uint64_t retry_cnt = 0;
   retry:
-    if (sx_lock && cur_x_cnt >= ori_x_max) {
+    if (sx_lock && cur_x_cnt == ori_x_max) {
       // ok
     } else if (!sx_lock && cur_x_cnt == ori_x_max && cur_s_cnt == ori_s_max) {
       // ok
@@ -567,7 +573,7 @@ void Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
       retry_cnt++;
       if (retry_cnt > 1000000) {
         printf("Deadlock [%u, %lu]\n", lock_addr.nodeID, lock_addr.offset);
-        printf("ori s %u x %u max s %u x %u\n", cur_s_cnt, cur_x_cnt, ori_s_max,
+        printf("cur s %u x %u max s %u x %u\n", cur_s_cnt, cur_x_cnt, ori_s_max,
                ori_x_max);
         assert(false);
       }
@@ -693,10 +699,13 @@ void Tree::insert_internal_update_left_child(const Key &k, GlobalAddress v,
 
   GlobalAddress p = root;
   int level_hint = -1;
+  Key min = kKeyMin;
+  Key max = kKeyMax;
 
 next:
 
-  if (!page_search(p, level_hint, k, result, cxt, coro_id)) {
+  if (!page_search(p, level_hint, p.child_gran, min, max, k, result, cxt,
+                   coro_id)) {
     std::cout << "SEARCH WARNING insert" << std::endl;
     p = get_root_ptr(cxt, coro_id);
     level_hint = -1;
@@ -708,13 +717,16 @@ next:
   if (result.sibling != GlobalAddress::Null()) {
     p = result.sibling;
     level_hint = result.level;
+    min = result.min; // remain the max
     goto next;
   }
 
   if (result.level >= level + 1) {
     p = result.next_level;
-    level_hint = result.level - 1;
     if (result.level > level + 1) {
+      level_hint = result.level - 1;
+      min = result.min;
+      max = result.max;
       goto next;
     }
   }
@@ -730,6 +742,9 @@ void Tree::insert(const Key &k, const Value &v, CoroContext *cxt, int coro_id) {
 
   before_operation(cxt, coro_id);
 
+  Key min = kKeyMin;
+  Key max = kKeyMax;
+
   if (enable_cache) {
     GlobalAddress cache_addr;
     auto entry = index_cache->search_from_cache(
@@ -738,11 +753,12 @@ void Tree::insert(const Key &k, const Value &v, CoroContext *cxt, int coro_id) {
       auto root = get_root_ptr(cxt, coro_id);
 #ifdef USE_SX_LOCK
       bool status =
-          leaf_page_store(cache_addr, k, v, root, 0, cache_addr.hash_offset,
+          leaf_page_store(cache_addr, k, v, root, 0, cache_addr.child_version,
                           cxt, coro_id, true, true);
 #else
-      bool status = leaf_page_store(cache_addr, k, v, root, 0,
-                                    cache_addr.hash_offset, cxt, coro_id, true);
+      bool status =
+          leaf_page_store(cache_addr, k, v, root, 0, cache_addr.child_version,
+                          cxt, coro_id, true);
 #endif
       if (status) {
         cache_hit[dsm_client_->get_my_thread_id()][0]++;
@@ -761,11 +777,13 @@ void Tree::insert(const Key &k, const Value &v, CoroContext *cxt, int coro_id) {
   int level_hint = -1;
 
 next:
-
-  if (!page_search(p, level_hint, k, result, cxt, coro_id)) {
+  if (!page_search(p, level_hint, p.child_gran, min, max, k, result, cxt,
+                   coro_id)) {
     std::cout << "SEARCH WARNING insert" << std::endl;
     p = get_root_ptr(cxt, coro_id);
     level_hint = -1;
+    min = kKeyMin;
+    max = kKeyMax;
     sleep(1);
     goto next;
   }
@@ -774,6 +792,7 @@ next:
     assert(result.level != 0);
     if (result.sibling != GlobalAddress::Null()) {
       p = result.sibling;
+      min = result.min; // remain the max
       level_hint = result.level;
       goto next;
     }
@@ -781,6 +800,8 @@ next:
     p = result.next_level;
     level_hint = result.level - 1;
     if (result.level != 1) {
+      min = result.min;
+      max = result.max;
       goto next;
     }
   }
@@ -792,10 +813,11 @@ next:
       printf("retry insert <k:%lu v:%lu> %d\n", k, v, cnt);
     }
 #ifdef USE_SX_LOCK
-    res = leaf_page_store(p, k, v, root, 0, p.hash_offset, cxt, coro_id, false,
-                          true);
+    res = leaf_page_store(p, k, v, root, 0, p.child_version, cxt, coro_id,
+                          false, true);
 #else
-    res = leaf_page_store(p, k, v, root, 0, p.hash_offset, cxt, coro_id, false);
+    res =
+        leaf_page_store(p, k, v, root, 0, p.child_version, cxt, coro_id, false);
 #endif
     ++cnt;
   }
@@ -806,6 +828,8 @@ bool Tree::search(const Key &k, Value &v, CoroContext *cxt, int coro_id) {
 
   auto p = get_root_ptr(cxt, coro_id);
   SearchResult result;
+  Key min = kKeyMin;
+  Key max = kKeyMax;
 
   int level_hint = -1;
 
@@ -831,7 +855,8 @@ bool Tree::search(const Key &k, Value &v, CoroContext *cxt, int coro_id) {
   }
 
 next:
-  if (!page_search(p, level_hint, k, result, cxt, coro_id, from_cache)) {
+  if (!page_search(p, level_hint, p.child_gran, min, max, k, result, cxt,
+                   coro_id, from_cache)) {
     if (from_cache) {  // cache stale
       index_cache->invalidate(entry);
       cache_hit[dsm_client_->get_my_thread_id()][0]--;
@@ -844,6 +869,8 @@ next:
       std::cout << "SEARCH WARNING search" << std::endl;
       sleep(1);
     }
+    min = kKeyMin;
+    max = kKeyMax;
     goto next;
   }
   if (result.is_leaf) {
@@ -853,6 +880,7 @@ next:
     }
     if (result.sibling != GlobalAddress::Null()) {  // turn right
       p = result.sibling;
+      min = result.min; // remain the max
       level_hint = 0;
       goto next;
     }
@@ -860,9 +888,12 @@ next:
   } else {         // internal
     if (result.sibling != GlobalAddress::Null()) {
       p = result.sibling;
+      min = result.min; // remain the max
       level_hint = result.level;
     } else {
       p = result.next_level;
+      min = result.min;
+      max = result.max;
       level_hint = result.level - 1;
     }
     goto next;
@@ -871,88 +902,91 @@ next:
 
 uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
                            CoroContext *cxt, int coro_id) {
-  const int kParaFetch = 32;
-  thread_local std::vector<InternalPage *> result;
-  thread_local std::vector<GlobalAddress> leaves;
+  // const int kParaFetch = 32;
+  // thread_local std::vector<InternalPage *> result;
+  // thread_local std::vector<GlobalAddress> leaves;
 
-  result.clear();
-  leaves.clear();
-  index_cache->search_range_from_cache(from, to, result);
+  // result.clear();
+  // leaves.clear();
+  // index_cache->search_range_from_cache(from, to, result);
 
-  // FIXME: here, we assume all innernal nodes are cached in compute node
-  if (result.empty()) {
-    return 0;
-  }
+  // // FIXME: here, we assume all innernal nodes are cached in compute node
+  // if (result.empty()) {
+  //   return 0;
+  // }
 
-  uint64_t counter = 0;
-  for (auto page : result) {
-    auto cnt = page->hdr.cnt;
-    auto addr = page->hdr.leftmost_ptr;
+  // uint64_t counter = 0;
+  // for (auto page : result) {
+  //   auto cnt = page->hdr.cnt;
+  //   auto addr = page->hdr.leftmost_ptr;
 
-    // [from, to]
-    // [lowest, page->records[0].key);
-    bool no_fetch = from > page->records[0].key || to < page->hdr.lowest;
-    if (!no_fetch) {
-      leaves.push_back(addr);
-    }
-    for (int i = 1; i < cnt; ++i) {
-      no_fetch = from > page->records[i].key || to < page->records[i - 1].key;
-      if (!no_fetch) {
-        leaves.push_back(page->records[i - 1].ptr);
-      }
-    }
+  //   // [from, to]
+  //   // [lowest, page->records[0].key);
+  //   bool no_fetch = from > page->records[0].key || to < page->hdr.lowest;
+  //   if (!no_fetch) {
+  //     leaves.push_back(addr);
+  //   }
+  //   for (int i = 1; i < cnt; ++i) {
+  //     no_fetch = from > page->records[i].key || to < page->records[i - 1].key;
+  //     if (!no_fetch) {
+  //       leaves.push_back(page->records[i - 1].ptr);
+  //     }
+  //   }
 
-    no_fetch = from > page->hdr.highest || to < page->records[cnt - 1].key;
-    if (!no_fetch) {
-      leaves.push_back(page->records[cnt - 1].ptr);
-    }
-  }
+  //   no_fetch = from > page->hdr.highest || to < page->records[cnt - 1].key;
+  //   if (!no_fetch) {
+  //     leaves.push_back(page->records[cnt - 1].ptr);
+  //   }
+  // }
 
-  int cq_cnt = 0;
-  char *range_buffer = (dsm_client_->get_rbuf(coro_id)).get_range_buffer();
-  for (size_t i = 0; i < leaves.size(); ++i) {
-    if (i > 0 && i % kParaFetch == 0) {
-      dsm_client_->PollRdmaCq(kParaFetch);
-      cq_cnt -= kParaFetch;
-      for (int k = 0; k < kParaFetch; ++k) {
-        auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
-        for (int i = 0; i < kLeafCardinality; ++i) {
-          auto &r = page->records[i];
-          if (r.value != kValueNull) {
-            if (r.key >= from && r.key <= to) {
-              value_buffer[counter++] = r.value;
-            }
-          }
-        }
-      }
-    }
-    dsm_client_->Read(range_buffer + kLeafPageSize * (i % kParaFetch),
-                      leaves[i], kLeafPageSize, true);
-    cq_cnt++;
-  }
+  // int cq_cnt = 0;
+  // char *range_buffer = (dsm_client_->get_rbuf(coro_id)).get_range_buffer();
+  // for (size_t i = 0; i < leaves.size(); ++i) {
+  //   if (i > 0 && i % kParaFetch == 0) {
+  //     dsm_client_->PollRdmaCq(kParaFetch);
+  //     cq_cnt -= kParaFetch;
+  //     for (int k = 0; k < kParaFetch; ++k) {
+  //       auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
+  //       for (int i = 0; i < kLeafCardinality; ++i) {
+  //         auto &r = page->records[i];
+  //         if (r.value != kValueNull) {
+  //           if (r.key >= from && r.key <= to) {
+  //             value_buffer[counter++] = r.value;
+  //           }
+  //         }
+  //       }
+  //     }
+  //   }
+  //   dsm_client_->Read(range_buffer + kLeafPageSize * (i % kParaFetch),
+  //                     leaves[i], kLeafPageSize, true);
+  //   cq_cnt++;
+  // }
 
-  if (cq_cnt != 0) {
-    dsm_client_->PollRdmaCq(cq_cnt);
-    for (int k = 0; k < cq_cnt; ++k) {
-      auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
-      for (int i = 0; i < kLeafCardinality; ++i) {
-        auto &r = page->records[i];
-        if (r.value != kValueNull) {
-          if (r.key >= from && r.key <= to) {
-            value_buffer[counter++] = r.value;
-          }
-        }
-      }
-    }
-  }
+  // if (cq_cnt != 0) {
+  //   dsm_client_->PollRdmaCq(cq_cnt);
+  //   for (int k = 0; k < cq_cnt; ++k) {
+  //     auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
+  //     for (int i = 0; i < kLeafCardinality; ++i) {
+  //       auto &r = page->records[i];
+  //       if (r.value != kValueNull) {
+  //         if (r.key >= from && r.key <= to) {
+  //           value_buffer[counter++] = r.value;
+  //         }
+  //       }
+  //     }
+  //   }
+  // }
 
-  return counter;
+  Debug::notifyError("range query not implemented");
+  return 0;
 }
 
 void Tree::del(const Key &k, CoroContext *cxt, int coro_id) {
   assert(dsm_client_->IsRegistered());
 
   before_operation(cxt, coro_id);
+  Key min = kKeyMin;
+  Key max = kKeyMax;
 
   if (enable_cache) {
     GlobalAddress cache_addr;
@@ -977,9 +1011,12 @@ void Tree::del(const Key &k, CoroContext *cxt, int coro_id) {
 
 next:
 
-  if (!page_search(p, level_hint, k, result, cxt, coro_id)) {
+  if (!page_search(p, level_hint, p.child_gran, min, max, k, result, cxt,
+                   coro_id)) {
     std::cout << "SEARCH WARNING del" << std::endl;
     p = get_root_ptr(cxt, coro_id);
+    min = kKeyMin;
+    max = kKeyMax;
     level_hint = -1;
     sleep(1);
     goto next;
@@ -989,6 +1026,7 @@ next:
     assert(result.level != 0);
     if (result.sibling != GlobalAddress::Null()) {
       p = result.sibling;
+      min = result.min;
       level_hint = result.level;
       goto next;
     }
@@ -996,6 +1034,8 @@ next:
     p = result.next_level;
     level_hint = result.level - 1;
     if (result.level != 1) {
+      min = result.min;
+      max = result.max;
       goto next;
     }
   }
@@ -1003,22 +1043,15 @@ next:
   leaf_page_del(p, k, 0, cxt, coro_id);
 }
 
-bool Tree::page_search(GlobalAddress page_addr, int level_hint, const Key &k,
-                       SearchResult &result, CoroContext *cxt, int coro_id,
-                       bool from_cache) {
+bool Tree::page_search(GlobalAddress page_addr, int level_hint, int read_gran,
+                       Key min, Key max, const Key &k, SearchResult &result,
+                       CoroContext *cxt, int coro_id, bool from_cache) {
   auto page_buffer = (dsm_client_->get_rbuf(coro_id)).get_page_buffer();
   auto header = (Header *)(page_buffer + (STRUCT_OFFSET(LeafPage, hdr)));
 
-  int counter = 0;
-re_read:
-  if (++counter > 100) {
-    printf("re read too many times\n");
-    // sleep(1);
-    assert(false);
-  }
-
   if (page_addr != g_root_ptr && level_hint == 0) {
-    uint64_t hash_offset = page_addr.hash_offset;
+    uint64_t hash_offset = page_addr.child_version;
+    assert(hash_offset % 2 == 0);
 
     bool res = false;
     [[maybe_unused]] int hash_re_read_cnt = 0;
@@ -1069,7 +1102,8 @@ re_read:
 
             // cal by other
             hash_offset =
-                (hash_offset + (other_group_id - group_id) * 2) % kNumBucket;
+                (hash_offset + kNumBucket + (group_id - other_group_id) * 2) %
+                kNumBucket;
             continue;
           }
         }
@@ -1080,9 +1114,10 @@ re_read:
                               sizeof(Header), cxt);
         if (k >= header->highest) {
           result.sibling = header->sibling_ptr;
+          result.min = header->highest;
           return true;
-        } else if (hash_offset != header->hash_offset) {
-          hash_offset = header->hash_offset;  // retry
+        } else if (hash_offset != header->node_version) {
+          hash_offset = header->node_version;  // retry
         } else {
           // not exist
           return true;
@@ -1091,23 +1126,67 @@ re_read:
     }
   }
 
-  dsm_client_->ReadSync(page_buffer, page_addr, kLeafPageSize, cxt);
-
-  if (page_addr == g_root_ptr) {
-    if (header->is_root == false) {
-      // update root ptr
-      get_root_ptr(cxt, coro_id, true);
-    }
+  int counter = 0;
+re_read:
+  if (++counter > 100) {
+    printf("re read too many times\n");
+    // sleep(1);
+    assert(false);
   }
 
   result.clear();
-  result.is_leaf = header->leftmost_ptr == GlobalAddress::Null();
-  result.level = header->level;
+  InternalEntry *guard = nullptr;
+  int group_id = -1;
+  uint8_t actual_gran = read_gran;
+  if (read_gran == gran_full) {
+    dsm_client_->ReadSync(page_buffer, page_addr, kLeafPageSize, cxt);
+    size_t start_offset =
+        offsetof(InternalPage, records) - sizeof(InternalEntry);
+    guard = reinterpret_cast<InternalEntry *>(page_buffer + start_offset);
+    // has header
+    result.is_leaf = header->level == 0;
+    result.level = header->level;
+    if (page_addr == g_root_ptr) {
+      if (header->is_root == false) {
+        // update root ptr
+        get_root_ptr(cxt, coro_id, true);
+      }
+    }
+  } else {
+    size_t start_offset, read_size;
+    group_id = get_key_group(k, min, max);
+    // read granularity
+    if (read_gran == gran_quarter) {
+      start_offset = offsetof(InternalPage, records) +
+                     (group_id * kGroupCardinality - 1) * sizeof(InternalEntry);
+      read_size = sizeof(InternalEntry) * (kGroupCardinality + 1);
+    } else {
+      // half
+      int begin = group_id < 2 ? 0 : kInternalCardinality / 2;
+      start_offset =
+          offsetof(InternalPage, records) + (begin - 1) * sizeof(InternalEntry);
+      read_size = sizeof(InternalEntry) * (kInternalCardinality / 2 + 1);
+    }
+    dsm_client_->ReadSync(page_buffer + start_offset,
+                          GADD(page_addr, start_offset), read_size, cxt);
+    guard = reinterpret_cast<InternalEntry *>(page_buffer + start_offset);
+    uint8_t actual_version = guard->ptr.group_node_version;
+    actual_gran = guard->ptr.group_gran;
+    if (actual_version != page_addr.child_version || actual_gran != read_gran) {
+      // though we may know the actual granularity, we don't know the actual min
+      // and max
+      read_gran = gran_full;
+      goto re_read;
+    }
+    assert(level_hint != 0);
+    result.is_leaf = false;
+    result.level = level_hint;
+  }
+
   path_stack[coro_id][result.level] = page_addr;
-  // std::cout << "level " << (int)result.level << " " << page_addr <<
-  // std::endl;
 
   if (result.is_leaf) {
+    assert(page_addr.child_gran == 0);
     auto page = (LeafPage *)page_buffer;
     if (!page->check_consistent()) {
       goto re_read;
@@ -1118,43 +1197,70 @@ re_read:
       return false;
     }
 
-    assert(result.level == 0);
     if (k >= page->hdr.highest) {  // should turn right
       result.sibling = page->hdr.sibling_ptr;
+      result.min = page->hdr.highest;
       return true;
     }
     if (k < page->hdr.lowest) {
       assert(false);
       return false;
     }
-    leaf_page_search(page, k, result);
+    uint64_t hash_offset = page->hdr.node_version;
+    int bucket_id = key_hash_bucket(k, hash_offset);
+    int pos_start;
+    if (bucket_id % 2) {
+      pos_start = (bucket_id / 2) * kGroupSize + kAssociativity;
+    } else {
+      pos_start = (bucket_id / 2) * kGroupSize;
+    }
+    try_group_search(page->records + pos_start, k, result);
   } else {
-    assert(result.level != 0);
+    // Internal Page
     assert(!from_cache);
     auto page = (InternalPage *)page_buffer;
-
-    if (!page->check_consistent()) {
-      goto re_read;
+    if (read_gran == gran_full) {
+      // TODO: how to add cache
+      if (result.level == 1 && enable_cache) {
+        index_cache->add_to_cache(page);
+      }
+      if (k >= page->hdr.highest) {  // should turn right
+        result.sibling = page->hdr.sibling_ptr;
+        result.min = page->hdr.highest;
+        return true;
+      }
+      if (k < page->hdr.lowest) {
+        // printf("key %ld error in level %d\n", k, page->hdr.level);
+        // sleep(10);
+        // print_and_check_tree();
+        assert(false);
+        return false;
+      }
+      // maybe is a retry: update group id, gran, guard
+      actual_gran = guard->ptr.group_gran;
+      if (actual_gran != gran_full) {
+        group_id = get_key_group(k, page->hdr.lowest, page->hdr.highest);
+        if (actual_gran == gran_quarter) {
+          guard = page->records + group_id * kGroupCardinality - 1;
+        } else {
+          // half
+          int begin = group_id < 2 ? 0 : kInternalCardinality / 2;
+          guard = page->records + begin - 1;
+        }
+      }
     }
 
-    if (result.level == 1 && enable_cache) {
-      index_cache->add_to_cache(page);
-    }
-
-    if (k >= page->hdr.highest) {  // should turn right
-      result.sibling = page->hdr.sibling_ptr;
-      return true;
-    }
-    if (k < page->hdr.lowest) {
-      printf("key %ld error in level %d\n", k, page->hdr.level);
-      sleep(10);
-      print_and_check_tree();
-      assert(false);
-      return false;
-    }
     // Timer timer;
     // timer.begin();
-    internal_page_search(page, k, result);
+    size_t search_cnt;
+    if (actual_gran == gran_quarter) {
+      search_cnt = kGroupCardinality + 1;
+    } else if (actual_gran == gran_half) {
+      search_cnt = kInternalCardinality / 2 + 1;
+    } else {
+      search_cnt = kInternalCardinality + 1;
+    }
+    internal_page_slice_search(guard, search_cnt, k, result);
     // auto t = timer.end();
     // stat_helper.add(dsm_client_->get_my_thread_id(), lat_internal_search, t);
   }
@@ -1162,52 +1268,33 @@ re_read:
   return true;
 }
 
-inline void Tree::internal_page_search(InternalPage *page, const Key &k,
-                                       SearchResult &result) {
-  assert(k >= page->hdr.lowest);
-  assert(k < page->hdr.highest);
-
-  auto cnt = page->hdr.cnt;
-  // page->debug();
-  if (k < page->records[0].key) {
-    result.next_level = page->hdr.leftmost_ptr;
-    return;
-  }
-
-  for (int i = 1; i < cnt; ++i) {
-    if (k < page->records[i].key) {
-      result.next_level = page->records[i - 1].ptr;
-      return;
-    }
-  }
-  result.next_level = page->records[cnt - 1].ptr;
-}
-
-inline void Tree::leaf_page_search(LeafPage *page, const Key &k,
-                                   SearchResult &result) {
-  // for (int i = 0; i < kLeafCardinality; ++i) {
-  //   auto &r = page->records[i];
-  //   if (r.key == k && r.value != kValueNull) {
-  //     result.val = r.value;
-  //     break;
-  //   }
-  // }
-
-  uint64_t hash_offset = page->hdr.hash_offset;
-  int bucket_id = key_hash_bucket(k, hash_offset);
-  int pos_start;
-  if (bucket_id % 2) {
-    pos_start = (bucket_id / 2) * kGroupSize + kAssociativity;
-  } else {
-    pos_start = (bucket_id / 2) * kGroupSize;
-  }
-
-  for (int i = 0; i < kAssociativity * 2; ++i) {
-    auto &r = page->records[pos_start + i];
-    if (r.key == k && r.value != kValueNull) {
-      result.val = r.value;
+inline void Tree::internal_page_slice_search(InternalEntry *entries, int cnt,
+                                             const Key k,
+                                             SearchResult &result) {
+  // entries[0] is the last entry of previous group or lowest of header
+  InternalEntry *p = entries + cnt - 1;
+  InternalEntry *bigger = p;
+  // from tail to front
+  while (p >= entries) {
+    if (p->ptr == GlobalAddress::Null()) {
+      // result.next_level = entries->ptr;
+      p = entries;
+      break;
+    } else if (k >= p->key) {
+      // result.next_level = p->ptr;
       break;
     }
+    bigger = p;
+    --p;
+  }
+  assert(p >= entries);
+  result.next_level = p->ptr;
+  if (p == entries + cnt - 1) {
+    // can't know max, so read full page
+    result.next_level.child_gran = gran_full;
+  } else {
+    result.min = p->key;
+    result.max = bigger->key;
   }
 }
 
@@ -1226,37 +1313,10 @@ inline bool Tree::try_group_search(LeafEntry *records, const Key &k,
   return false;
 }
 
-void Tree::internal_page_split(InternalPage *page, InternalPage *sibling,
-                               GlobalAddress sibling_addr, Key &split_key) {
-  int cnt = kInternalCardinality;
-  int m = cnt / 2;
-  split_key = page->records[m].key;
-  // for (int i = m + 1; i < cnt; ++i) {  // move
-  //   sibling->records[i - m - 1].key = page->records[i].key;
-  //   sibling->records[i - m - 1].ptr = page->records[i].ptr;
-  // }
-  memcpy(sibling->records, page->records + m + 1,
-         (cnt - m - 1) * sizeof(InternalEntry));
-  page->hdr.cnt = m;
-  sibling->hdr.cnt = cnt - m - 1;
-
-  sibling->hdr.leftmost_ptr = page->records[m].ptr;
-  sibling->hdr.lowest = page->records[m].key;
-  sibling->hdr.highest = page->hdr.highest;
-  page->hdr.highest = page->records[m].key;
-
-  // link
-  sibling->hdr.sibling_ptr = page->hdr.sibling_ptr;
-  page->hdr.sibling_ptr = sibling_addr;
-
-  sibling->set_consistent();
-}
-
 void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
                                GlobalAddress v, GlobalAddress root, int level,
                                CoroContext *cxt, int coro_id) {
-  uint64_t lock_index =
-      CityHash64((char *)&page_addr, sizeof(page_addr)) % define::kNumOfLock;
+  uint64_t lock_index = get_lock_index(page_addr);
 
   GlobalAddress lock_addr;
   lock_addr.nodeID = page_addr.nodeID;
@@ -1288,74 +1348,174 @@ void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
   }
   assert(k >= page->hdr.lowest);
 
-  auto cnt = page->hdr.cnt;
+
+
+  int group_id = get_key_group(k, page->hdr.lowest, page->hdr.highest);
+  uint8_t cur_group_gran =
+      page->records[kGroupCardinality * (group_id + 1) - 1].ptr.group_gran;
+  int end;  // not inclusive
+  int max_cnt;
+  if (cur_group_gran == gran_quarter) {
+    end = kGroupCardinality * (group_id + 1);
+    max_cnt = kGroupCardinality;
+  } else if (cur_group_gran == gran_half) {
+    end = group_id < 2 ? kGroupCardinality * 2 : kInternalCardinality;
+    max_cnt = kGroupCardinality * 2;
+  } else {
+    assert(cur_group_gran == gran_full);
+    end = kInternalCardinality;
+    max_cnt = kInternalCardinality;
+  }
 
   bool is_update = false;
-  uint16_t insert_index = 0;
-  for (int i = cnt - 1; i >= 0; --i) {
-    if (page->records[i].key == k) {  // find and update
-      page->records[i].ptr = v;
-      // assert(false);
+  int i = 0;
+  for (; i < max_cnt; ++i) {
+    int idx = end - 1 - i;
+    if (page->records[idx].ptr == GlobalAddress::Null()) {
+      break;
+    } else if (k == page->records[idx].key) {
+      page->records[idx].ptr = v;
       is_update = true;
       break;
-    }
-    if (page->records[i].key < k) {
-      insert_index = i + 1;
+    } else if (k > page->records[idx].key) {
       break;
     }
   }
+  int16_t insert_index = end - 1 - i;  // may be -1 of start
+  while (i < max_cnt &&
+         page->records[end - 1 - i].ptr != GlobalAddress::Null()) {
+    ++i;
+  }
+  int group_cnt = i;
 
-  assert(cnt != kInternalCardinality);
+  // assert(!is_update);
 
-  if (!is_update) {  // insert and shift
-    for (int i = cnt; i > insert_index; --i) {
-      page->records[i].key = page->records[i - 1].key;
-      page->records[i].ptr = page->records[i - 1].ptr;
+  if (is_update) {
+    page->set_consistent();
+    write_page_and_unlock(page_buffer, page_addr, kInternalPageSize, cas_buffer,
+                          lock_addr, cxt, coro_id, false, false);
+    return;
+  }
+
+  // insert
+
+  if (group_cnt < max_cnt) {
+    // not exceed, shift to left
+    // we redefine operator= for GlobalAddress, don't use memmove
+    for (int i = end - group_cnt; i <= insert_index; ++i) {
+      page->records[i - 1].key = page->records[i].key;
+      page->records[i - 1].ptr = page->records[i].ptr;
     }
     page->records[insert_index].key = k;
     page->records[insert_index].ptr = v;
 
-    page->hdr.cnt++;
-  }
-
-  cnt = page->hdr.cnt;
-  bool need_split = cnt == kInternalCardinality;
-  Key split_key;
-  GlobalAddress sibling_addr;
-  if (need_split) {  // need split
-    sibling_addr = dsm_client_->Alloc(kInternalPageSize);
-    auto sibling_buf = rbuf.get_sibling_buffer();
-    auto sibling = new (sibling_buf) InternalPage(page->hdr.level);
-
-    internal_page_split(page, sibling, sibling_addr, split_key);
-    dsm_client_->WriteSync(sibling_buf, sibling_addr, kInternalPageSize, cxt);
-
-    if (root == page_addr) {
-      page->hdr.is_root = false;
-    }
-  }
-
-  page->set_consistent();
-  write_page_and_unlock(page_buffer, page_addr, kInternalPageSize, cas_buffer,
-                        lock_addr, cxt, coro_id, need_split, false);
-
-  if (!need_split) return;
-
-  if (root == page_addr) {  // update root
-
-    if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
-                        cxt, coro_id)) {
-      return;
-    }
-  }
-
-  auto up_level = path_stack[coro_id][level + 1];
-
-  if (up_level != GlobalAddress::Null()) {
-    internal_page_store(up_level, split_key, sibling_addr, root, level + 1, cxt,
-                        coro_id);
+    // modify range: [end - group_cnt - 1, insert_index]
+    ++group_cnt;
+    // allow full
+    size_t modify_offset = offsetof(InternalPage, records) +
+                          (end - group_cnt - 1) * sizeof(InternalEntry);
+    size_t modify_size =
+        (insert_index - (end - group_cnt - 1) + 1) * sizeof(InternalEntry);
+    page->set_consistent();
+    write_page_and_unlock(page_buffer + modify_offset,
+                          GADD(page_addr, modify_offset), modify_size,
+                          cas_buffer, lock_addr, cxt, coro_id, true, false);
   } else {
-    assert(false);
+    // current group is full, need span
+    bool need_split = false;
+    int new_gran = gran_half;
+    if (cur_group_gran == gran_quarter) {
+      bool succ =
+          page->gran_quarter_to_half_and_insert(group_id, insert_index, k, v);
+      // rearrange other half
+      bool other_is_left = group_id >= 2;
+      page->gran_quarter_to_half(other_is_left);
+
+      if (!succ) {
+        new_gran = gran_full;
+        // both full
+        need_split = !page->gran_half_to_full_and_insert(insert_index, k, v);
+      }
+    } else if (cur_group_gran == gran_half) {
+      new_gran = gran_full;
+      need_split = !page->gran_half_to_full_and_insert(insert_index, k, v);
+    } else {
+      // already full
+      assert(group_cnt == kInternalCardinality);
+      need_split = true;
+    }
+
+    if (!need_split) {
+      // already span and insert
+      page->hdr.leftmost_ptr.group_gran = new_gran;
+      page->records[kGroupCardinality - 1].ptr.group_gran = new_gran;
+      page->records[2 * kGroupCardinality - 1].ptr.group_gran = new_gran;
+      page->records[3 * kGroupCardinality - 1].ptr.group_gran = new_gran;
+      page->records[kInternalCardinality - 1].ptr.group_gran = new_gran;
+      write_page_and_unlock(page_buffer, page_addr, kInternalPageSize,
+                            cas_buffer, lock_addr, cxt, coro_id, false, false);
+      // update parent ptr
+      page_addr.child_gran = new_gran;
+      auto up_level = path_stack[coro_id][level + 1];
+      if (up_level != GlobalAddress::Null()) {
+        internal_page_store(up_level, page->hdr.lowest, page_addr, root,
+                            level + 1, cxt, coro_id);
+      } else {
+        // TODO:
+        assert(false);
+      }
+    } else {
+      // need split and insert
+      GlobalAddress sibling_addr = dsm_client_->Alloc(kInternalPageSize);
+      auto sibling_buf = rbuf.get_sibling_buffer();
+      auto sibling = new (sibling_buf) InternalPage(page->hdr.level);
+
+      // split
+      std::vector<InternalEntry> tmp_records(
+          page->records, page->records + kInternalCardinality);
+      tmp_records.insert(tmp_records.begin() + insert_index + 1, {k, v});
+      int m = kInternalCardinality / 2;
+      Key split_key = tmp_records[m].key;
+      GlobalAddress split_val = tmp_records[m].ptr;
+
+      int sib_gran = sibling->rearrange_records(tmp_records.data() + m + 1, m,
+                                                split_key, page->hdr.highest);
+      sibling_addr.child_gran = sib_gran;
+      split_val.group_gran = sib_gran;
+      sibling->hdr.leftmost_ptr = split_val;
+      sibling->hdr.sibling_ptr = page->hdr.sibling_ptr;
+
+      page_addr.child_version = page->update_node_version();
+      int cur_gran = page->rearrange_records(tmp_records.data(), m,
+                                             page->hdr.lowest, split_key);
+      page_addr.child_gran = cur_gran;
+      page->hdr.sibling_ptr = sibling_addr;
+
+      if (root == page_addr) {
+        page->hdr.is_root = false;
+      }
+
+      dsm_client_->WriteSync(sibling_buf, sibling_addr, kInternalPageSize, cxt);
+      write_page_and_unlock(page_buffer, page_addr, kInternalPageSize,
+                            cas_buffer, lock_addr, cxt, coro_id, true, false);
+      if (root == page_addr) {
+        if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
+                            cxt, coro_id)) {
+          return;
+        }
+      }
+      auto up_level = path_stack[coro_id][level + 1];
+      if (up_level != GlobalAddress::Null()) {
+        // internal_page_store(up_level, split_key, sibling_addr, root, level +
+        // 1,
+        //                     cxt, coro_id);
+        internal_page_store_update_left_child(up_level, split_key, sibling_addr,
+                                              page->hdr.lowest, page_addr, root,
+                                              level + 1, cxt, coro_id);
+      } else {
+        assert(false);
+      }
+    }
   }
 }
 
@@ -1363,9 +1523,8 @@ void Tree::internal_page_store_update_left_child(
     GlobalAddress page_addr, const Key &k, GlobalAddress v,
     const Key &left_child, GlobalAddress left_child_val, GlobalAddress root,
     int level, CoroContext *cxt, int coro_id) {
-  assert(level == 1);
-  uint64_t lock_index =
-      CityHash64((char *)&page_addr, sizeof(page_addr)) % define::kNumOfLock;
+  // assert(level == 1);
+  uint64_t lock_index = get_lock_index(page_addr);
 
   GlobalAddress lock_addr;
   lock_addr.nodeID = page_addr.nodeID;
@@ -1383,7 +1542,7 @@ void Tree::internal_page_store_update_left_child(
   assert(page->hdr.level == level);
   assert(page->check_consistent());
 
-  auto cnt = page->hdr.cnt;
+  // auto cnt = page->hdr.cnt;
 
   if (left_child >= page->hdr.highest) {
 #ifdef USE_SX_LOCK
@@ -1402,105 +1561,225 @@ void Tree::internal_page_store_update_left_child(
     return;
   } else if (k >= page->hdr.highest) {
     // left child in current node, new sibling leaf in sibling node
-    int i = cnt - 1;
-    for (; i >= 0; --i) {
-      if (page->records[i].key == left_child) {
-        assert(page->records[i].ptr == left_child_val);
-        page->records[i].ptr = left_child_val;
-        break;
-      }
-    }
-    if (i < 0) {
+    if (left_child == page->hdr.lowest) {
       assert(page->hdr.leftmost_ptr == left_child_val);
       page->hdr.leftmost_ptr = left_child_val;
+      size_t modify_offset = (char *)&page->hdr.leftmost_ptr - (char *)page;
+      write_page_and_unlock(page_buffer + modify_offset,
+                            GADD(page_addr, modify_offset),
+                            sizeof(GlobalAddress), cas_buffer, lock_addr, cxt,
+                            coro_id, true, false);
+    } else {
+      [[maybe_unused]] int idx = page->try_update(left_child, left_child_val);
+      assert(idx != -1);
+      if (idx != -1) {
+        size_t modify_offset =
+            offsetof(InternalPage, records) + idx * sizeof(InternalEntry);
+        write_page_and_unlock(page_buffer + modify_offset,
+                              GADD(page_addr, modify_offset),
+                              sizeof(InternalEntry), cas_buffer, lock_addr, cxt,
+                              coro_id, true, false);
+      }
     }
-    page->set_consistent();
-    write_page_and_unlock(page_buffer, page_addr, kInternalPageSize, cas_buffer,
-                          lock_addr, cxt, coro_id, true, false);
-
     this->internal_page_store(page->hdr.sibling_ptr, k, v, root, level, cxt,
                               coro_id);
     return;
   }
   assert(k >= page->hdr.lowest);
 
+  int group_id = get_key_group(k, page->hdr.lowest, page->hdr.highest);
+  uint8_t cur_group_gran =
+      page->records[kGroupCardinality * (group_id + 1) - 1].ptr.group_gran;
+  int end;  // not inclusive
+  int max_cnt;
+  if (cur_group_gran == gran_quarter) {
+    end = kGroupCardinality * (group_id + 1);
+    max_cnt = kGroupCardinality;
+  } else if (cur_group_gran == gran_half) {
+    end = group_id < 2 ? kGroupCardinality * 2 : kInternalCardinality;
+    max_cnt = kGroupCardinality * 2;
+  } else {
+    assert(cur_group_gran == gran_full);
+    end = kInternalCardinality;
+    max_cnt = kInternalCardinality;
+  }
+
   bool is_update = false;
-  uint16_t insert_index = 0;
-  for (int i = cnt - 1; i >= 0; --i) {
-    if (page->records[i].key == k) {  // find and update
-      page->records[i].ptr = v;
-      // assert(false);
+  int i = 0;
+  // update k, not found key, can't be the last one of previous group
+  for (; i < max_cnt; ++i) {
+    int idx = end - 1 - i;
+    if (page->records[idx].ptr == GlobalAddress::Null()) {
+      break;
+    } else if (k == page->records[idx].key) {
+      page->records[idx].ptr = v;
       is_update = true;
       break;
-    }
-    if (page->records[i].key < k) {
-      insert_index = i + 1;
+    } else if (k > page->records[idx].key) {
       break;
     }
   }
-
-  assert(cnt != kInternalCardinality);
+  int16_t insert_index = end - 1 - i;  // may be -1 of start
+  while (i < max_cnt &&
+         page->records[end - 1 - i].ptr != GlobalAddress::Null()) {
+    ++i;
+  }
+  int group_cnt = i;
 
   assert(!is_update);
 
-  if (!is_update) {  // insert and shift
-    for (int i = cnt; i > insert_index; --i) {
-      page->records[i].key = page->records[i - 1].key;
-      page->records[i].ptr = page->records[i - 1].ptr;
+  if (is_update) {
+    page->set_consistent();
+    write_page_and_unlock(page_buffer, page_addr, kInternalPageSize, cas_buffer,
+                          lock_addr, cxt, coro_id, false, false);
+    return;
+  }
+
+  // insert
+  if (group_cnt < max_cnt) {
+    // not exceed, shift to left
+    // we redefine operator= for GlobalAddress, don't use memmove
+    for (int i = end - group_cnt; i <= insert_index; ++i) {
+      page->records[i - 1].key = page->records[i].key;
+      page->records[i - 1].ptr = page->records[i].ptr;
     }
     page->records[insert_index].key = k;
     page->records[insert_index].ptr = v;
 
-    if (insert_index > 0) {
+    // modify range: [end - group_cnt - 1, insert_index]
+    size_t modify_offset, modify_size;
+    if (insert_index >= end - group_cnt) {
       assert(page->records[insert_index - 1].key == left_child &&
              page->records[insert_index - 1].ptr == left_child_val);
       page->records[insert_index - 1].ptr = left_child_val;
+      modify_offset = offsetof(InternalPage, records) +
+                      (end - group_cnt - 1) * sizeof(InternalEntry);
+      modify_size =
+          (insert_index - (end - group_cnt - 1) + 1) * sizeof(InternalEntry);
     } else {
-      assert(page->hdr.leftmost_ptr == left_child_val);
-      page->hdr.leftmost_ptr = left_child_val;
+      // records[-1] is leftmost_ptr in header
+      assert((page->records + end - max_cnt - 1)->ptr == left_child_val);
+      (page->records + end - max_cnt - 1)->ptr = left_child_val;
+      // (page->records + end - max_cnt - 1)->ptr.group_gran = cur_group_gran;
+      modify_offset = offsetof(InternalPage, records) +
+                      (end - max_cnt - 1) * sizeof(InternalEntry);
+      modify_size =
+          (insert_index - (end - max_cnt - 1) + 1) * sizeof(InternalEntry);
     }
 
-    page->hdr.cnt++;
-  }
-
-  cnt = page->hdr.cnt;
-  bool need_split = cnt == kInternalCardinality;
-  Key split_key;
-  GlobalAddress sibling_addr;
-  if (need_split) {  // need split
-    sibling_addr = dsm_client_->Alloc(kInternalPageSize);
-    auto sibling_buf = rbuf.get_sibling_buffer();
-    auto sibling = new (sibling_buf) InternalPage(page->hdr.level);
-
-    internal_page_split(page, sibling, sibling_addr, split_key);
-    dsm_client_->WriteSync(sibling_buf, sibling_addr, kInternalPageSize, cxt);
-
-    if (root == page_addr) {
-      page->hdr.is_root = false;
-    }
-  }
-
-  page->set_consistent();
-  write_page_and_unlock(page_buffer, page_addr, kInternalPageSize, cas_buffer,
-                        lock_addr, cxt, coro_id, need_split, false);
-
-  if (!need_split) return;
-
-  if (root == page_addr) {  // update root
-
-    if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
-                        cxt, coro_id)) {
-      return;
-    }
-  }
-
-  auto up_level = path_stack[coro_id][level + 1];
-
-  if (up_level != GlobalAddress::Null()) {
-    internal_page_store(up_level, split_key, sibling_addr, root, level + 1, cxt,
-                        coro_id);
+    ++group_cnt;
+    // allow full
+    page->set_consistent();
+    write_page_and_unlock(page_buffer + modify_offset,
+                          GADD(page_addr, modify_offset), modify_size,
+                          cas_buffer, lock_addr, cxt, coro_id, true, false);
   } else {
-    assert(false);
+    // current group is full, need span
+    // before shift, left is insert_index
+    if (insert_index >= end - group_cnt) {
+      assert(page->records[insert_index].key == left_child &&
+             page->records[insert_index].ptr == left_child_val);
+      page->records[insert_index].ptr = left_child_val;
+    } else {
+      // records[-1] is leftmost_ptr in header
+      assert((page->records + end - max_cnt - 1)->ptr == left_child_val);
+      (page->records + end - max_cnt - 1)->ptr = left_child_val;
+      // (page->records + end - max_cnt - 1)->ptr.group_gran = cur_group_gran;
+    }
+
+    bool need_split = false;
+    int new_gran = gran_half;
+    if (cur_group_gran == gran_quarter) {
+      bool succ =
+          page->gran_quarter_to_half_and_insert(group_id, insert_index, k, v);
+      // rearrange other half
+      bool other_is_left = group_id >= 2;
+      page->gran_quarter_to_half(other_is_left);
+
+      if (!succ) {
+        new_gran = gran_full;
+        // both full
+        need_split = !page->gran_half_to_full_and_insert(insert_index, k, v);
+      }
+    } else if (cur_group_gran == gran_half) {
+      new_gran = gran_full;
+      need_split = !page->gran_half_to_full_and_insert(insert_index, k, v);
+    } else {
+      // already full
+      assert(group_cnt == kInternalCardinality);
+      need_split = true;
+    }
+
+    if (!need_split) {
+      // already span and insert
+      page->hdr.leftmost_ptr.group_gran = new_gran;
+      page->records[kGroupCardinality - 1].ptr.group_gran = new_gran;
+      page->records[2 * kGroupCardinality - 1].ptr.group_gran = new_gran;
+      page->records[3 * kGroupCardinality - 1].ptr.group_gran = new_gran;
+      page->records[kInternalCardinality - 1].ptr.group_gran = new_gran;
+      write_page_and_unlock(page_buffer, page_addr, kInternalPageSize,
+                            cas_buffer, lock_addr, cxt, coro_id, false, false);
+      // update parent ptr
+      page_addr.child_gran = new_gran;
+      auto up_level = path_stack[coro_id][level + 1];
+      if (up_level != GlobalAddress::Null()) {
+        internal_page_store(up_level, page->hdr.lowest, page_addr, root,
+                            level + 1, cxt, coro_id);
+      } else {
+        // TODO:
+        assert(false);
+      }
+    } else {
+      // need split and insert
+      GlobalAddress sibling_addr = dsm_client_->Alloc(kInternalPageSize);
+      auto sibling_buf = rbuf.get_sibling_buffer();
+      auto sibling = new (sibling_buf) InternalPage(page->hdr.level);
+
+      // split
+      std::vector<InternalEntry> tmp_records(
+          page->records, page->records + kInternalCardinality);
+      tmp_records.insert(tmp_records.begin() + insert_index + 1, {k, v});
+      int m = kInternalCardinality / 2;
+      Key split_key = tmp_records[m].key;
+      GlobalAddress split_val = tmp_records[m].ptr;
+
+      int sib_gran = sibling->rearrange_records(tmp_records.data() + m + 1, m,
+                                                split_key, page->hdr.highest);
+      sibling_addr.child_gran = sib_gran;
+      split_val.group_gran = sib_gran;
+      sibling->hdr.leftmost_ptr = split_val;
+      sibling->hdr.sibling_ptr = page->hdr.sibling_ptr;
+
+      page_addr.child_version = page->update_node_version();
+      int cur_gran = page->rearrange_records(tmp_records.data(), m,
+                                             page->hdr.lowest, split_key);
+      page_addr.child_gran = cur_gran;
+      page->hdr.sibling_ptr = sibling_addr;
+
+      if (root == page_addr) {
+        page->hdr.is_root = false;
+      }
+ 
+      dsm_client_->WriteSync(sibling_buf, sibling_addr, kInternalPageSize, cxt);
+      write_page_and_unlock(page_buffer, page_addr, kInternalPageSize,
+                            cas_buffer, lock_addr, cxt, coro_id, true, false);
+      if (root == page_addr) {
+        if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
+                            cxt, coro_id)) {
+          return;
+        }
+      }
+      auto up_level = path_stack[coro_id][level + 1];
+      if (up_level != GlobalAddress::Null()) {
+        // internal_page_store(up_level, split_key, sibling_addr, root, level + 1,
+        //                     cxt, coro_id);
+        internal_page_store_update_left_child(up_level, split_key, sibling_addr,
+                                              page->hdr.lowest, page_addr, root,
+                                              level + 1, cxt, coro_id);
+      } else {
+        assert(false);
+      }
+    }
   }
 }
 
@@ -1553,9 +1832,8 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
                            const Value &v, GlobalAddress root, int level,
                            uint64_t hash_offset, CoroContext *cxt, int coro_id,
                            bool from_cache, bool sx_lock) {
-  assert(hash_offset == page_addr.hash_offset);
-  uint64_t lock_index =
-      CityHash64((char *)&page_addr, sizeof(page_addr)) % define::kNumOfLock;
+  // assert(hash_offset == page_addr.child_version);
+  uint64_t lock_index = get_lock_index(page_addr);
 
   GlobalAddress lock_addr;
 
@@ -1603,6 +1881,7 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   }
 
   if (k >= page->hdr.highest) {
+    // note that retry may also get here
 #ifdef USE_SX_LOCK
     this->unlock_sx_addr(lock_addr, cas_buffer, cxt, coro_id, true, sx_lock);
 #else
@@ -1616,7 +1895,7 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   }
   assert(k >= page->hdr.lowest);
 
-  if (hash_offset != page->hdr.hash_offset) {
+  if (hash_offset != page->hdr.node_version) {
     if (from_cache) {
 #ifdef USE_SX_LOCK
       this->unlock_sx_addr(lock_addr, cas_buffer, cxt, coro_id, true, sx_lock);
@@ -1626,8 +1905,8 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
       return false;
     } else {
       // when does this happen?
-      hash_offset = page->hdr.hash_offset;
-      page_addr.hash_offset = hash_offset;
+      hash_offset = page->hdr.node_version;
+      page_addr.child_version = hash_offset;
     }
   }
 
@@ -1709,17 +1988,13 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   // split
 
   LeafEntry tmp_records[kLeafCardinality];
-  memcpy(tmp_records, page->records, sizeof(LeafEntry) * kLeafCardinality);
-
-  std::sort(tmp_records, tmp_records + kLeafCardinality,
-            [](const LeafEntry &a, const LeafEntry &b) {
-              if (b.value == kValueNull && a.value != kValueNull) {
-                return true;
-              } else if (a.value == kValueNull) {
-                return false;
-              }
-              return a.key < b.key;
-            });
+  int cnt = 0;
+  for (int i = 0; i < kLeafCardinality; ++i) {
+    if (page->records[i].value != kValueNull) {
+      tmp_records[cnt++] = page->records[i];
+    }
+  }
+  std::sort(tmp_records, tmp_records + cnt);
 
   GlobalAddress sibling_addr;
   sibling_addr = dsm_client_->Alloc(kLeafPageSize);
@@ -1730,12 +2005,6 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   // std::cout << "addr " <<  sibling_addr << " | level " <<
   // (int)(page->hdr.level) << std::endl;
 
-  int cnt = 0;
-  while (cnt < kLeafCardinality && tmp_records[cnt].key != 0 &&
-         tmp_records[cnt].value != kValueNull) {
-    ++cnt;
-  }
-
   int m = cnt / 2;
   Key split_key = tmp_records[m].key;
   assert(split_key > page->hdr.lowest);
@@ -1744,7 +2013,7 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   memset(reinterpret_cast<void *>(page->records), 0,
          sizeof(LeafEntry) * kLeafCardinality);
   page->update_hash_offset();
-  uint64_t page_new_hash_offset = page->hdr.hash_offset;
+  uint64_t page_new_hash_offset = page->hdr.node_version;
   for (int i = 0; i < m; ++i) {
     int bucket_id = key_hash_bucket(tmp_records[i].key, page_new_hash_offset);
     page->insert_for_split(tmp_records[i].key, tmp_records[i].value, bucket_id);
@@ -1759,8 +2028,8 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   sibling->hdr.highest = page->hdr.highest;
   page->hdr.highest = split_key;
 
-  sibling->hdr.hash_offset = hash_offset;
-  sibling_addr.hash_offset = hash_offset;
+  sibling->hdr.node_version = hash_offset;
+  sibling_addr.child_version = hash_offset;
 
   // link
   sibling->hdr.sibling_ptr = page->hdr.sibling_ptr;
@@ -1778,7 +2047,11 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   }
 
   sibling->set_consistent();
-  dsm_client_->WriteSync(sibling_buf, sibling_addr, kLeafPageSize, cxt);
+  if (sibling_addr.nodeID == page_addr.nodeID) {
+    dsm_client_->Write(sibling_buf, sibling_addr, kLeafPageSize, false);
+  } else {
+    dsm_client_->WriteSync(sibling_buf, sibling_addr, kLeafPageSize, cxt);
+  }
 
   page->set_consistent();
 
@@ -1790,7 +2063,9 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   write_page_and_unlock(page_buffer, page_addr, kLeafPageSize, cas_buffer,
                         lock_addr, cxt, coro_id, true, sx_lock);
 
-  page_addr.hash_offset = page->hdr.hash_offset;
+  page_addr.child_version = page->hdr.node_version;
+  assert(page_addr.child_version % 2 == 0);
+  assert(sibling_addr.child_version % 2 == 0);
   if (root == page_addr) {  // update root
     if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
                         cxt, coro_id)) {
@@ -1818,8 +2093,7 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
 
 bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
                          CoroContext *cxt, int coro_id, bool from_cache) {
-  uint64_t lock_index =
-      CityHash64((char *)&page_addr, sizeof(page_addr)) % define::kNumOfLock;
+  uint64_t lock_index = get_lock_index(page_addr);
 
   GlobalAddress lock_addr;
 

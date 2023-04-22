@@ -37,7 +37,7 @@ Tree *tree;
 DSMClient *dsm_client;
 
 inline Key to_key(uint64_t k) {
-  return (CityHash64((char *)&k, sizeof(k)) + 1) % kKeySpace;
+  return (CityHash64((char *)&k, sizeof(k))) % kKeySpace + 1;
 }
 
 class RequsetGenBench : public RequstGen {

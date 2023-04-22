@@ -177,7 +177,7 @@ class DSMClient {
 
   void RpcCallDir(const RawMessage &m, uint16_t node_id, uint16_t dir_id = 0) {
     auto buffer = (RawMessage *)i_con_->message->getSendPool();
-    memcpy(buffer, &m, sizeof(RawMessage));
+    memcpy(reinterpret_cast<void *>(buffer), &m, sizeof(RawMessage));
     buffer->node_id = my_client_id_;
     buffer->app_id = thread_id_;
     i_con_->sendMessage2Dir(buffer, node_id, dir_id);

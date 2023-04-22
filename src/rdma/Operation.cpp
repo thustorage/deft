@@ -214,6 +214,9 @@ bool rdmaWrite(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
   if (isSignaled) {
     wr.send_flags = IBV_SEND_SIGNALED;
   }
+  if (size < MAX_INLINE_DATA) {
+    wr.send_flags |= IBV_SEND_INLINE;
+  }
 
   wr.wr.rdma.remote_addr = dest;
   wr.wr.rdma.rkey = remoteRKey;

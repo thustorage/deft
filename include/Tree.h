@@ -65,205 +65,389 @@ struct SearchResult {
   GlobalAddress next_level;
   Value val;
   Key other_in_group = 0;
+  Key min;
+  Key max;
 
   SearchResult() = default;
   void clear() {
-    memset(this, 0, sizeof(SearchResult));
+    memset(reinterpret_cast<void *>(this), 0, sizeof(SearchResult));
   }
 };
 
-class Header {
-//  private:
- public:
-  GlobalAddress leftmost_ptr = GlobalAddress::Null();
+struct alignas(64) Header {
+// uint16_t level;
+  uint8_t padding[28];
+  uint8_t node_version;
+  // int8_t cnt = 0;
+  uint8_t level : 7;
+  uint8_t is_root : 1;
+  uint16_t index_cache_freq;
+
+  Key highest = kKeyMax;
   GlobalAddress sibling_ptr = GlobalAddress::Null();
   Key lowest = kKeyMin;
-  Key highest = kKeyMax;
-  // uint16_t level;
-  uint8_t hash_offset = 0;  // in leaf node
-  uint8_t level = 0;
-  int8_t cnt = 0;
-  int8_t is_root = false;
+  GlobalAddress leftmost_ptr = GlobalAddress::Null();
 
-  friend class InternalPage;
-  friend class LeafPage;
-  friend class Tree;
-  friend class IndexCache;
-
- public:
-  Header() {}
+  Header() : node_version(0), level(0), is_root(false), index_cache_freq(0) {}
 
   void debug() const {
     std::cout << "leftmost=" << leftmost_ptr << ", "
               << "sibling=" << sibling_ptr << ", "
               << "level=" << (int)level << ","
-              << "cnt=" << cnt << ","
+              // << "cnt=" << cnt << ","
               << "range=[" << lowest << " - " << highest << "]";
   }
-} __attribute__((packed));
+};
+static_assert(sizeof(Header) == 64);
 
 
-class InternalEntry {
- public:
-  Key key;
+struct InternalEntry {
+  Key key = 0;
   GlobalAddress ptr;
+};
 
-  InternalEntry() {
-    ptr = GlobalAddress::Null();
-    key = 0;
-  }
-} __attribute__((packed));
-
-class LeafEntry {
- public:
+struct LeafEntry {
   // uint8_t f_version : 4;
-  Key key;
-  Value value;
+  Key key = 0;
+  Value value = 0;
   // uint8_t r_version : 4;
+  bool operator<(const LeafEntry &rhs) const { return key < rhs.key; }
+};
 
-  LeafEntry() {
-    // f_version = 0;
-    // r_version = 0;
-    value = kValueNull;
-    key = 0;
-  }
-} __attribute__((packed));
+constexpr int kInternalCardinality =
+    (kInternalPageSize - sizeof(Header)) / sizeof(InternalEntry);
+constexpr int kGroupCardinality = kInternalCardinality / 4;
 
-constexpr int kInternalCardinality = (kInternalPageSize - sizeof(Header) -
-                                      sizeof(uint8_t) * 2 - sizeof(uint64_t)) /
-                                     sizeof(InternalEntry);
-
-// constexpr int kLeafCardinality =
-//     (kLeafPageSize - sizeof(Header) - sizeof(uint8_t) * 2 - sizeof(uint64_t)) /
-//     sizeof(LeafEntry);
 constexpr int kAssociativity = 4;
 constexpr int kNumBucket = 10;
 constexpr int kGroupSize = kAssociativity * 3;
 constexpr int kLeafCardinality = kNumBucket * kAssociativity / 2 * 3;
 
-// constexpr int kLeafPosBaseMax = kLeafCardinality - NUM_LINEAR_PROBING + 1;
+static inline int key_hash_bucket(const Key &k, uint64_t hash_offset) {
+  return (k + hash_offset) % kNumBucket;
+}
 
+static inline double get_quarter(Key min, Key max) { return (max - min) / 4.0; }
+
+static inline int get_key_group(const Key k, Key min, Key max) {
+  double quarter = get_quarter(min, max);
+  return (k - min) / quarter;
+}
+
+static inline uint64_t get_lock_index(GlobalAddress addr) {
+  GlobalAddress a;
+  a.offset = addr.offset;
+  a.nodeID = addr.nodeID;
+  return CityHash64((char *)&a, sizeof(a)) % define::kNumOfLock;
+}
 
 class InternalPage {
-// private:
-  union {
-    uint32_t crc;
-    uint64_t embedding_lock;
-    uint64_t index_cache_freq;
-  };
-
-  uint8_t front_version;
+ private:
   Header hdr;
   InternalEntry records[kInternalCardinality];
 
   // uint8_t padding[3];
-  uint8_t rear_version;
 
   friend class Tree;
   friend class IndexCache;
 
-public:
+ public:
   // this is called when tree grows
+  // only for new root node
   InternalPage(GlobalAddress left, const Key &key, GlobalAddress right,
                uint32_t level = 0) {
+    assert(left.group_gran == gran_full);
     hdr.leftmost_ptr = left;
     hdr.level = level;
-    records[0].key = key;
-    records[0].ptr = right;
-    records[1].ptr = GlobalAddress::Null();
+    records[kInternalCardinality - 1].key = key;
+    records[kInternalCardinality - 1].ptr = right;
+    // records[1].ptr = GlobalAddress::Null();
 
-    hdr.cnt = 1;
-
-    front_version = 0;
-    rear_version = 0;
+    // hdr.cnt = 1;
   }
 
   InternalPage(uint32_t level = 0) {
     hdr.level = level;
-    records[0].ptr = GlobalAddress::Null();
-
-    front_version = 0;
-    rear_version = 0;
-
-    embedding_lock = 0;
+    // records[0].ptr = GlobalAddress::Null();
   }
 
-  void set_consistent() {
-    front_version++;
-    rear_version = front_version;
-#ifdef CONFIG_ENABLE_CRC
-    this->crc =
-        CityHash32((char *)&front_version, (&rear_version) - (&front_version));
-#endif
+  void set_consistent() {}
+
+  bool check_consistent() const { return true; }
+
+  int try_update(const Key k, GlobalAddress v) {
+    // if (k == hdr.lowest) {
+    //   assert(hdr.leftmost_ptr == v);
+    //   hdr.leftmost_ptr = v;
+    //   return true;
+    // }
+
+    int group_id = get_key_group(k, hdr.lowest, hdr.highest);
+    uint8_t cur_group_gran =
+        records[kGroupCardinality * (group_id + 1) - 1].ptr.group_gran;
+    int end;  // not inclusive
+    int max_cnt;
+    if (cur_group_gran == gran_quarter) {
+      end = kGroupCardinality * (group_id + 1);
+      max_cnt = kGroupCardinality;
+    } else if (cur_group_gran == gran_half) {
+      end = group_id < 2 ? kGroupCardinality * 2 : kInternalCardinality;
+      max_cnt = kGroupCardinality * 2;
+    } else {
+      assert(cur_group_gran == gran_full);
+      end = kInternalCardinality;
+      max_cnt = kInternalCardinality;
+    }
+
+    int i = 0;
+    for (; i < max_cnt; ++i) {
+      int idx = end - 1 - i;
+      if (records[idx].ptr == GlobalAddress::Null()) {
+        break;
+      } else if (k == records[idx].key) {
+        records[idx].ptr = v;
+        return idx;
+      } else if (k > records[idx].key) {
+        break;
+      }
+    }
+    return -1;
   }
 
-  bool check_consistent() const {
+  bool gran_quarter_to_half_and_insert(int cur_group_id, int cur_insert_index,
+                                       const Key k, GlobalAddress v) {
+    // cur_group is full
+    int cur_end = (cur_group_id + 1) * kGroupCardinality;
+    assert(cur_insert_index < cur_end &&
+           cur_insert_index >= cur_end - kGroupCardinality - 1);
+    if (cur_group_id % 2 == 0) {
+      // left, shift to right
+      // cur_left, insert_index, cur_right, right group
+      int i = cur_end;
+      for (; i < cur_end + kGroupCardinality; ++i) {
+        if (records[i].ptr != GlobalAddress::Null()) {
+          break;
+        }
+      }
+      if (i == cur_end) {
+        // neighbour is full
+        return false;
+      }
+      // [insert_index + 1, end - 1] -> [x, i - 1]
+      int diff = i - cur_end;
+      for (int j = cur_end - 1; j > cur_insert_index; --j) {
+        records[j + diff] = records[j];
+      }
+      records[cur_insert_index + diff].key = k;
+      records[cur_insert_index + diff].ptr = v;
+      // [end - group_cnt, insert_index] shift to right by (diff - 1)
+      for (int j = cur_insert_index; j >= cur_end - kGroupCardinality; --j) {
+        records[j + diff - 1] = records[j];
+      }
+      memset(reinterpret_cast<void *>(records + cur_end - kGroupCardinality), 0,
+             sizeof(InternalEntry) * (diff - 1));
+    } else {
+      // right
+      // left group, cur left, insert, cur right
+      int left_margin = cur_end - kGroupCardinality * 2;
+      if (records[left_margin].ptr != GlobalAddress::Null()) {
+        // neighbour is full
+        return false;
+      }
+      // [left_margin + 1, insert_index], shift to left by 1
+      for (int j = left_margin + 1; j <= cur_insert_index; ++j) {
+        records[j - 1] = records[j];
+      }
+      records[cur_insert_index].key = k;
+      records[cur_insert_index].ptr = v;
+    }
+    // ++hdr.cnt;
+    return true;
+  }
 
-    bool succ = true;
-#ifdef CONFIG_ENABLE_CRC
-    auto cal_crc =
-        CityHash32((char *)&front_version, (&rear_version) - (&front_version));
-    succ = cal_crc == this->crc;
-#endif
-    succ = succ && (rear_version == front_version);
+  void gran_quarter_to_half(bool left_half) {
+    int mid = left_half ? kGroupCardinality : kGroupCardinality * 3;
 
-    return succ;
+    int i = mid;
+    for (; i < mid + kGroupCardinality; ++i) {
+      if (records[i].ptr != GlobalAddress::Null()) {
+        break;
+      }
+    }
+    if (i == mid) {
+      // already in half, don't forget to update gran in ptr
+      return;
+    } else {
+      int diff = i - mid;
+      // shift right
+      for (int j = mid - 1; j >= mid - kGroupCardinality; --j) {
+        records[j + diff] = records[j];
+      }
+      memset(reinterpret_cast<void *>(records + mid - kGroupCardinality), 0,
+             sizeof(InternalEntry) * diff);
+    }
+  }
+
+  bool gran_half_to_full_and_insert(int insert_index, const Key k,
+                                    GlobalAddress v) {
+    if (insert_index < kGroupCardinality * 2) {
+      // cur in left half
+      // cur_left, insert, cur_right, right half
+      int cur_end = kGroupCardinality * 2;
+      int i = cur_end;
+      for (; i < kInternalCardinality; ++i) {
+        if (records[i].ptr != GlobalAddress::Null()) {
+          break;
+        }
+      }
+      if (i == cur_end) {
+        // neighbour is full
+        return false;
+      }
+      // [insert_index + 1, end - 1] -> [x, i - 1]
+      int diff = i - cur_end;
+      for (int j = cur_end - 1; j > insert_index; --j) {
+        records[j + diff] = records[j];
+      }
+      records[insert_index + diff].key = k;
+      records[insert_index + diff].ptr = v;
+      for (int j = insert_index; j >= 0; --j) {
+        records[j + diff - 1] = records[j];
+      }
+      memset(reinterpret_cast<void *>(records), 0,
+             sizeof(InternalEntry) * (diff - 1));
+    } else {
+      // right
+      // left half, cur left, insert, cur right
+      if (records[0].ptr != GlobalAddress::Null()) {
+        // neighbour is full
+        return false;
+      }
+      // [1, insert_index], shift left by 1
+      for (int i = 1; i <= insert_index; ++i) {
+        records[i - 1] = records[i];
+      }
+      records[insert_index].key = k;
+      records[insert_index].ptr = v;
+    }
+    // ++hdr.cnt;
+    return true;
+  }
+
+  int rearrange_records(InternalEntry *entries, size_t cnt, Key min, Key max) {
+    assert(cnt == kInternalCardinality / 2);
+    hdr.lowest = min;
+    hdr.highest = max;
+    // hdr.cnt = cnt;
+    memset(reinterpret_cast<void *>(records), 0,
+           sizeof(InternalEntry) * kInternalCardinality);
+
+    double quarter = get_quarter(min, max);
+    int group_cnt[4];
+    InternalEntry *p = entries;
+    InternalEntry *end = entries + cnt;
+    // count each group's number
+    for (int i = 0; i < 3; i++) {
+      double cur_max = min + (i + 1) * quarter;
+      group_cnt[i] = 0;
+      while (p < end && p->key < cur_max) {
+        ++group_cnt[i];
+        ++p;
+      }
+    }
+    group_cnt[3] = cnt - group_cnt[0] - group_cnt[1] - group_cnt[2];
+
+    int new_gran = gran_quarter;
+    for (int i = 0; i < 4; ++i) {
+      if (group_cnt[i] > kGroupCardinality) {
+        new_gran = gran_half;
+        // half group
+        break;
+      }
+    }
+
+    p = entries;
+    if (new_gran != gran_half) {
+      for (int i = 0; i < 4; ++i) {
+        if (group_cnt[i] > 0) {
+          int cur_start = (i + 1) * kGroupCardinality - group_cnt[i];
+          for (int j = 0; j < group_cnt[i]; ++j) {
+            records[cur_start + j] = *p;
+            ++p;
+          }
+        }
+      }
+    } else {
+      group_cnt[0] = group_cnt[0] + group_cnt[1];
+      group_cnt[1] = group_cnt[2] + group_cnt[3];
+      for (int i = 0; i < 2; ++i) {
+        if (group_cnt[i] > 0) {
+          int cur_start = (i + 1) * kGroupCardinality * 2 - group_cnt[i];
+          for (int j = 0; j < group_cnt[i]; ++j) {
+            records[cur_start + j] = *p;
+            ++p;
+          }
+        }
+      }
+    }
+
+    hdr.leftmost_ptr.group_gran = new_gran;
+    records[kGroupCardinality - 1].ptr.group_gran = new_gran;
+    records[2 * kGroupCardinality - 1].ptr.group_gran = new_gran;
+    records[3 * kGroupCardinality - 1].ptr.group_gran = new_gran;
+    records[kInternalCardinality - 1].ptr.group_gran = new_gran;
+
+    hdr.leftmost_ptr.group_node_version = hdr.node_version;
+    records[kGroupCardinality - 1].ptr.group_node_version = hdr.node_version;
+    records[2 * kGroupCardinality - 1].ptr.group_node_version =
+        hdr.node_version;
+    records[3 * kGroupCardinality - 1].ptr.group_node_version =
+        hdr.node_version;
+    records[kInternalCardinality - 1].ptr.group_node_version = hdr.node_version;
+    return new_gran;
+  }
+
+  uint8_t update_node_version() {
+    hdr.node_version = (hdr.node_version + 1) % (1u << 4);  // only 4 bit in ptr
+    return hdr.node_version;
   }
 
   void debug() const {
     std::cout << "InternalPage@ ";
     hdr.debug();
-    std::cout << "version: [" << (int)front_version << ", " << (int)rear_version
-              << "]" << std::endl;
   }
 
   void verbose_debug() const {
     this->debug();
-    for (int i = 0; i < this->hdr.cnt; ++i) {
+    for (int i = 0; i < kInternalCardinality; ++i) {
       printf("[%lu %lu] ", this->records[i].key, this->records[i].ptr.val);
     }
     printf("\n");
   }
 
-} __attribute__((packed));
+};
 
 class LeafPage {
-private:
-  union {
-    uint32_t crc;
-    uint64_t embedding_lock;
-  };
-  uint8_t front_version;
+ private:
+  // uint8_t front_version;
   Header hdr;
   LeafEntry records[kLeafCardinality];
 
   // uint8_t padding[1];
-  uint8_t rear_version;
+  // uint8_t rear_version;
 
   friend class Tree;
 
-public:
+ public:
   LeafPage(uint32_t level = 0) {
     hdr.level = level;
     records[0].value = kValueNull;
-
-    front_version = 0;
-    rear_version = 0;
-
-    embedding_lock = 0;
   }
 
-  void set_consistent() {
-    front_version++;
-    rear_version = front_version;
-#ifdef CONFIG_ENABLE_CRC
-    this->crc =
-        CityHash32((char *)&front_version, (&rear_version) - (&front_version));
-#endif
-  }
+  void set_consistent() {}
 
   void update_hash_offset() {
-    hdr.hash_offset = (hdr.hash_offset + 2) % kNumBucket;
+    hdr.node_version = (hdr.node_version + 2) % kNumBucket;
   }
 
   bool insert_for_split(const Key &k, const Value &v, int bucket_id) {
@@ -294,30 +478,16 @@ public:
     return false;
   }
 
-  bool check_consistent() const {
-    bool succ = true;
-#ifdef CONFIG_ENABLE_CRC
-    auto cal_crc =
-        CityHash32((char *)&front_version, (&rear_version) - (&front_version));
-    succ = cal_crc == this->crc;
-#endif
-    succ = succ && (rear_version == front_version);
-    return succ;
-  }
+  bool check_consistent() const { return true; }
 
   void debug() const {
     std::cout << "LeafPage@ ";
     hdr.debug();
-    std::cout << "version: [" << (int)front_version << ", " << (int)rear_version
-              << "]" << std::endl;
   }
-
-} __attribute__((packed));
-
+};
 
 class Tree {
-
-public:
+ public:
   Tree(DSMClient *dsm, uint16_t tree_id = 0);
 
   void insert(const Key &k, const Value &v, CoroContext *cxt = nullptr,
@@ -338,7 +508,7 @@ public:
   void index_cache_statistics();
   void clear_statistics();
 
-private:
+ private:
   DSMClient *dsm_client_;
   uint64_t tree_id;
   GlobalAddress root_ptr_ptr; // the address which stores root pointer;
@@ -403,16 +573,13 @@ private:
                           GlobalAddress lock_addr, CoroContext *cxt,
                           int coro_id, bool sx_lock);
 
-  bool page_search(GlobalAddress page_addr, int level_hint, const Key &k,
-                   SearchResult &result, CoroContext *cxt, int coro_id,
-                   bool from_cache = false);
-  void internal_page_search(InternalPage *page, const Key &k,
-                            SearchResult &result);
-  void leaf_page_search(LeafPage *page, const Key &k, SearchResult &result);
+  bool page_search(GlobalAddress page_addr, int level_hint, int read_gran,
+                   Key min, Key max, const Key &k, SearchResult &result,
+                   CoroContext *cxt, int coro_id, bool from_cache = false);
+  void internal_page_slice_search(InternalEntry *entries, int cnt, const Key k,
+                                  SearchResult &result);
   bool try_group_search(LeafEntry *records, const Key &k, SearchResult &result);
 
-  void internal_page_split(InternalPage *page, InternalPage *sibling,
-                           GlobalAddress sibling_addr, Key &split_key);
   void internal_page_store(GlobalAddress page_addr, const Key &k,
                            GlobalAddress value, GlobalAddress root, int level,
                            CoroContext *cxt, int coro_id);
@@ -437,11 +604,4 @@ private:
                           int coro_id);
   bool can_hand_over(GlobalAddress lock_addr);
   void releases_local_lock(GlobalAddress lock_addr);
-
-  // int key_hash_pos(const Key &k, uint64_t page_hash, uint64_t hash_offset) {
-  //   return (k + page_hash + hash_offset) % kLeafPosBaseMax;
-  // }
-  int key_hash_bucket(const Key &k, uint64_t hash_offset) {
-    return (k + hash_offset) % kNumBucket;
-  }
 };
