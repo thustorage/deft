@@ -3,6 +3,7 @@
 // #include "DSM.h"
 #include "dsm_client.h"
 #include <atomic>
+#include <stddef.h>
 #include <city.h>
 #include <functional>
 #include <iostream>
@@ -100,13 +101,12 @@ struct alignas(64) Header {
 };
 static_assert(sizeof(Header) == 64);
 
-
 struct InternalEntry {
   Key key = 0;
   GlobalAddress ptr;
 };
 
-struct LeafEntry {
+struct __attribute__((packed)) LeafEntry {
   // uint8_t f_version : 4;
   Key key = 0;
   Value value = 0;
@@ -117,15 +117,6 @@ struct LeafEntry {
 constexpr int kInternalCardinality =
     (kInternalPageSize - sizeof(Header)) / sizeof(InternalEntry);
 constexpr int kGroupCardinality = kInternalCardinality / 4;
-
-constexpr int kAssociativity = 4;
-constexpr int kNumBucket = 10;
-constexpr int kGroupSize = kAssociativity * 3;
-constexpr int kLeafCardinality = kNumBucket * kAssociativity / 2 * 3;
-
-static inline int key_hash_bucket(const Key &k, uint64_t hash_offset) {
-  return (k + hash_offset) % kNumBucket;
-}
 
 static inline double get_quarter(Key min, Key max) { return (max - min) / 4.0; }
 
@@ -427,11 +418,131 @@ class InternalPage {
 
 };
 
+// LeafEntry Group in leaf page
+
+// constexpr int kAssociativity = 5;
+// constexpr int kNumBucket = 8;
+// constexpr int kNumGroup = kNumBucket / 2;
+// constexpr int kGroupSize = kAssociativity * 3;
+// constexpr int kLeafCardinality = kNumGroup * kAssociativity * 3;
+
+constexpr int kAssociativity = 4;
+constexpr int kNumBucket = 10;
+constexpr int kNumGroup = kNumBucket / 2;
+constexpr int kGroupSize = kAssociativity * 3;
+constexpr int kLeafCardinality = kNumGroup * kAssociativity * 3;
+
+constexpr int kOverflowAssociativity = kAssociativity - 1;
+
+static inline int key_hash_bucket(const Key &k) { return k % kNumBucket; }
+
+struct __attribute__((packed)) LeafEntryGroup {
+  uint32_t version_front_front = 0;
+  LeafEntry front[kAssociativity];
+  uint32_t version_back_front = 0;
+  LeafEntry overflow[kAssociativity - 1];
+  uint32_t version_front_back = 0;
+  LeafEntry back[kAssociativity];
+  uint32_t version_back_back = 0;
+
+  bool find(const Key &k, SearchResult &result, bool is_front) {
+    if (is_front) {
+      for (int i = 0; i < kAssociativity; ++i) {
+        if (front[i].key == k && front[i].value != kValueNull) {
+          result.val = front[i].value;
+          return true;
+        }
+      }
+    } else {
+      for (int i = 0; i < kAssociativity; ++i) {
+        if (back[i].key == k && back[i].value != kValueNull) {
+          result.val = back[i].value;
+          return true;
+        }
+      }
+    }
+    for (int i = 0; i < kAssociativity - 1; ++i) {
+      if (overflow[i].key == k && overflow[i].value != kValueNull) {
+        result.val = overflow[i].value;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool insert(const Key &k, const Value v, bool is_front) {
+    if (is_front) {
+      for (int i = 0; i < kAssociativity; ++i) {
+        if (front[i].key == k) {
+          front[i].value = v;
+          return true;
+        } else if (front[i].value == kValueNull) {
+          front[i].key = k;
+          front[i].value = v;
+          return true;
+        }
+      }
+    } else {
+      for (int i = 0; i < kAssociativity; ++i) {
+        if (back[i].key == k) {
+          back[i].value = v;
+          return true;
+        } else if (back[i].value == kValueNull) {
+          back[i].key = k;
+          back[i].value = v;
+          return true;
+        }
+      }
+    }
+    for (int i = 0; i < kAssociativity - 1; ++i) {
+      if (overflow[i].key == k) {
+        overflow[i].value = v;
+        return true;
+      } else if (overflow[i].value == kValueNull) {
+        overflow[i].key = k;
+        overflow[i].value = v;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool update(const Key &k, const Value v, bool is_front) {
+    if (is_front) {
+      for (int i = 0; i < kAssociativity; ++i) {
+        if (front[i].key == k) {
+          front[i].value = v;
+          return true;
+        }
+      }
+    } else {
+      for (int i = 0; i < kAssociativity; ++i) {
+        if (back[i].key == k) {
+          back[i].value = v;
+          return true;
+        }
+      }
+    }
+    for (int i = 0; i < kAssociativity - 1; ++i) {
+      if (overflow[i].key == k) {
+        overflow[i].value = v;
+        return true;
+      }
+    }
+    return false;
+  }
+};
+constexpr size_t kFrontOffset = 0;
+constexpr size_t kBackOffset = offsetof(LeafEntryGroup, version_back_front);
+constexpr size_t kReadBucketSize =
+    sizeof(int) * 3 + sizeof(LeafEntry) * (2 * kAssociativity - 1);
+
 class LeafPage {
  private:
   // uint8_t front_version;
   Header hdr;
-  LeafEntry records[kLeafCardinality];
+  // LeafEntry records[kLeafCardinality];
+  LeafEntryGroup groups[kNumGroup];
 
   // uint8_t padding[1];
   // uint8_t rear_version;
@@ -441,44 +552,23 @@ class LeafPage {
  public:
   LeafPage(uint32_t level = 0) {
     hdr.level = level;
-    records[0].value = kValueNull;
+    // records[0].value = kValueNull;
   }
 
-  void set_consistent() {}
-
-  void update_hash_offset() {
-    hdr.node_version = (hdr.node_version + 2) % kNumBucket;
+  uint8_t update_node_version() {
+    hdr.node_version = (hdr.node_version + 1) % (1u << 4);  // only 4 bit in ptr
+    for (int i = 0; i < kNumGroup; ++i) {
+      groups[i].version_front_front = hdr.node_version;
+      groups[i].version_back_front = hdr.node_version;
+      groups[i].version_front_back = hdr.node_version;
+      groups[i].version_back_back = hdr.node_version;
+    }
+    return hdr.node_version;
   }
 
-  bool insert_for_split(const Key &k, const Value &v, int bucket_id) {
-    int pos_start, overflow_start;
-    if (bucket_id % 2) {
-      pos_start = (bucket_id / 2) * kGroupSize + kAssociativity * 2;
-      overflow_start = pos_start - kAssociativity;
-    } else {
-      pos_start = (bucket_id / 2) * kGroupSize;
-      overflow_start = pos_start + kAssociativity;
-    }
-    for (int i = pos_start; i < pos_start + kAssociativity; ++i) {
-      assert(records[i].key != k);
-      if (records[i].value == kValueNull) {
-        records[i].key = k;
-        records[i].value = v;
-        return true;
-      }
-    }
-    for (int i = overflow_start; i < overflow_start + kAssociativity; ++i) {
-      assert(records[i].key != k);
-      if (records[i].value == kValueNull) {
-        records[i].key = k;
-        records[i].value = v;
-        return true;
-      }
-    }
-    return false;
+  bool insert_for_split(const Key &k, const Value v, int bucket_id) {
+    return groups[bucket_id / 2].insert(k, v, !(bucket_id % 2));
   }
-
-  bool check_consistent() const { return true; }
 
   void debug() const {
     std::cout << "LeafPage@ ";
@@ -573,6 +663,9 @@ class Tree {
                           GlobalAddress lock_addr, CoroContext *cxt,
                           int coro_id, bool sx_lock);
 
+  bool leaf_page_group_search(GlobalAddress page_addr, const Key &k,
+                              SearchResult &result, CoroContext *cxt,
+                              int coro_id, bool from_cache);
   bool page_search(GlobalAddress page_addr, int level_hint, int read_gran,
                    Key min, Key max, const Key &k, SearchResult &result,
                    CoroContext *cxt, int coro_id, bool from_cache = false);
@@ -590,12 +683,11 @@ class Tree {
                                              GlobalAddress root, int level,
                                              CoroContext *cxt, int coro_id);
   bool try_leaf_page_update(GlobalAddress page_addr, GlobalAddress lock_addr,
-                            const Key &k, const Value &v, uint64_t hash_offset,
-                            CoroContext *cxt, int coro_id,
-                            bool sx_lock = false);
+                            const Key &k, const Value &v, CoroContext *cxt,
+                            int coro_id, bool sx_lock = false);
   bool leaf_page_store(GlobalAddress page_addr, const Key &k, const Value &v,
-                       GlobalAddress root, int level, uint64_t hash_offset,
-                       CoroContext *cxt, int coro_id, bool from_cache = false,
+                       GlobalAddress root, int level, CoroContext *cxt,
+                       int coro_id, bool from_cache = false,
                        bool sx_lock = false);
   bool leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
                      CoroContext *cxt, int coro_id, bool from_cache = false);

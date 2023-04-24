@@ -1,7 +1,6 @@
 #include "Tree.h"
 
 #include <city.h>
-#include <stddef.h>
 #include <algorithm>
 #include <iostream>
 #include <queue>
@@ -55,9 +54,8 @@ Tree::Tree(DSMClient *dsm_client, uint16_t tree_id)
   // try to init tree and install root pointer
   auto page_buffer = (dsm_client_->get_rbuf(0)).get_page_buffer();
   auto root_addr = dsm_client_->Alloc(kLeafPageSize);
-  auto root_page = new (page_buffer) LeafPage;
+  [[maybe_unused]] auto root_page = new (page_buffer) LeafPage;
 
-  root_page->set_consistent();
   dsm_client_->WriteSync(page_buffer, root_addr, kLeafPageSize);
 
   auto cas_buffer = (dsm_client_->get_rbuf(0)).get_cas_buffer();
@@ -176,40 +174,40 @@ bool Tree::update_new_root(GlobalAddress left, const Key &k,
 }
 
 void Tree::print_and_check_tree(CoroContext *cxt, int coro_id) {
-  assert(dsm_client_->IsRegistered());
+//   assert(dsm_client_->IsRegistered());
 
-  auto root = get_root_ptr(cxt, coro_id);
-  // SearchResult result;
+//   auto root = get_root_ptr(cxt, coro_id);
+//   // SearchResult result;
 
-  GlobalAddress p = root;
-  GlobalAddress levels[define::kMaxLevelOfTree];
-  int level_cnt = 0;
-  auto page_buffer = (dsm_client_->get_rbuf(coro_id)).get_page_buffer();
-  GlobalAddress leaf_head;
+//   GlobalAddress p = root;
+//   GlobalAddress levels[define::kMaxLevelOfTree];
+//   int level_cnt = 0;
+//   auto page_buffer = (dsm_client_->get_rbuf(coro_id)).get_page_buffer();
+//   GlobalAddress leaf_head;
 
-next_level:
+// next_level:
 
-  dsm_client_->ReadSync(page_buffer, p, kLeafPageSize);
-  auto header = (Header *)(page_buffer + (STRUCT_OFFSET(LeafPage, hdr)));
-  levels[level_cnt++] = p;
-  if (header->level != 0) {
-    p = header->leftmost_ptr;
-    goto next_level;
-  } else {
-    leaf_head = p;
-  }
+//   dsm_client_->ReadSync(page_buffer, p, kLeafPageSize);
+//   auto header = (Header *)(page_buffer + (STRUCT_OFFSET(LeafPage, hdr)));
+//   levels[level_cnt++] = p;
+//   if (header->level != 0) {
+//     p = header->leftmost_ptr;
+//     goto next_level;
+//   } else {
+//     leaf_head = p;
+//   }
 
-next:
-  dsm_client_->ReadSync(page_buffer, leaf_head, kLeafPageSize);
-  auto page = (LeafPage *)page_buffer;
-  for (int i = 0; i < kLeafCardinality; ++i) {
-    if (page->records[i].value != kValueNull) {
-    }
-  }
-  while (page->hdr.sibling_ptr != GlobalAddress::Null()) {
-    leaf_head = page->hdr.sibling_ptr;
-    goto next;
-  }
+// next:
+//   dsm_client_->ReadSync(page_buffer, leaf_head, kLeafPageSize);
+//   auto page = (LeafPage *)page_buffer;
+//   for (int i = 0; i < kLeafCardinality; ++i) {
+//     if (page->records[i].value != kValueNull) {
+//     }
+//   }
+//   while (page->hdr.sibling_ptr != GlobalAddress::Null()) {
+//     leaf_head = page->hdr.sibling_ptr;
+//     goto next;
+//   }
 
   // for (int i = 0; i < level_cnt; ++i) {
   //   dsm->read_sync(page_buffer, levels[i], kLeafPageSize);
@@ -753,12 +751,10 @@ void Tree::insert(const Key &k, const Value &v, CoroContext *cxt, int coro_id) {
       auto root = get_root_ptr(cxt, coro_id);
 #ifdef USE_SX_LOCK
       bool status =
-          leaf_page_store(cache_addr, k, v, root, 0, cache_addr.child_version,
-                          cxt, coro_id, true, true);
+          leaf_page_store(cache_addr, k, v, root, 0, cxt, coro_id, true, true);
 #else
       bool status =
-          leaf_page_store(cache_addr, k, v, root, 0, cache_addr.child_version,
-                          cxt, coro_id, true);
+          leaf_page_store(cache_addr, k, v, root, 0, cxt, coro_id, true);
 #endif
       if (status) {
         cache_hit[dsm_client_->get_my_thread_id()][0]++;
@@ -813,11 +809,9 @@ next:
       printf("retry insert <k:%lu v:%lu> %d\n", k, v, cnt);
     }
 #ifdef USE_SX_LOCK
-    res = leaf_page_store(p, k, v, root, 0, p.child_version, cxt, coro_id,
-                          false, true);
+    res = leaf_page_store(p, k, v, root, 0, cxt, coro_id, false, true);
 #else
-    res =
-        leaf_page_store(p, k, v, root, 0, p.child_version, cxt, coro_id, false);
+    res = leaf_page_store(p, k, v, root, 0, cxt, coro_id, false);
 #endif
     ++cnt;
   }
@@ -1043,94 +1037,83 @@ next:
   leaf_page_del(p, k, 0, cxt, coro_id);
 }
 
-bool Tree::page_search(GlobalAddress page_addr, int level_hint, int read_gran,
-                       Key min, Key max, const Key &k, SearchResult &result,
-                       CoroContext *cxt, int coro_id, bool from_cache) {
+bool Tree::leaf_page_group_search(GlobalAddress page_addr, const Key &k,
+                                  SearchResult &result, CoroContext *cxt,
+                                  int coro_id, bool from_cache) {
   auto page_buffer = (dsm_client_->get_rbuf(coro_id)).get_page_buffer();
-  auto header = (Header *)(page_buffer + (STRUCT_OFFSET(LeafPage, hdr)));
+  uint8_t leaf_version = page_addr.child_version;
 
-  if (page_addr != g_root_ptr && level_hint == 0) {
-    uint64_t hash_offset = page_addr.child_version;
-    assert(hash_offset % 2 == 0);
+  int bucket_id = key_hash_bucket(k);
+  int group_id = bucket_id / 2;
 
-    bool res = false;
-    [[maybe_unused]] int hash_re_read_cnt = 0;
-    while (!res) {
-      assert(++hash_re_read_cnt < 100);  // retry too many times
-      // dsm->read_sync(page_buffer, page_addr, kLeafPageSize, cxt);
-      // auto page = (LeafPage *)page_buffer;
+  int group_offset =
+      offsetof(LeafPage, groups) + sizeof(LeafEntryGroup) * group_id;
+  LeafEntryGroup *group = (LeafEntryGroup *)(page_buffer + group_offset);
+  int pos_offset = bucket_id % 2 ? kBackOffset : kFrontOffset;
 
-      int bucket_id = key_hash_bucket(k, hash_offset);
-      int pos_start;
-      if (bucket_id % 2) {
-        pos_start = (bucket_id / 2) * kGroupSize + kAssociativity;
-      } else {
-        pos_start = (bucket_id / 2) * kGroupSize;
-      }
-      int group_offset =
-          offsetof(LeafPage, records) + sizeof(LeafEntry) * pos_start;
-      LeafEntry *group = (LeafEntry *)(page_buffer + group_offset);
-
-      dsm_client_->ReadSync((char *)group, GADD(page_addr, group_offset),
-                            sizeof(LeafEntry) * kAssociativity * 2, cxt);
-
-      result.clear();
-      result.is_leaf = true;
-      result.level = 0;
-      res = try_group_search(group, k, result);
-      if (res) {
-        return true;
-      } else {
-        if (from_cache) {
-          return false;
-        }
-
-        // may has split:
-        // 1. in current leaf, different hash offset
-        // 2. in sibling leaf
-        if (result.other_in_group != 0) {
-          int group_id = bucket_id / 2;
-          int other_group_id =
-              key_hash_bucket(result.other_in_group, hash_offset) / 2;
-          if (group_id != other_group_id) {
-            // page has split
-            // read header
-            // dsm->read_sync((char *)header,
-            //                GADD(page_addr, offsetof(LeafPage, hdr)),
-            //                sizeof(Header), cxt);
-            // hash_offset = header->hash_offset;
-
-            // cal by other
-            hash_offset =
-                (hash_offset + kNumBucket + (group_id - other_group_id) * 2) %
-                kNumBucket;
-            continue;
-          }
-        }
-        // no other in group, or offset correct but in sibling leaf
-        // read header to further check
+  int read_counter = 0;
+re_read:
+  if (++read_counter > 10) {
+    printf("re-read too many times\n");
+    sleep(1);
+  }
+  dsm_client_->ReadSync((char *)group + pos_offset,
+                        GADD(page_addr, group_offset + pos_offset),
+                        kReadBucketSize, cxt);
+  result.clear();
+  result.is_leaf = true;
+  result.level = 0;
+  uint8_t front_version, back_version;
+  if (bucket_id % 2) {
+    front_version = group->version_back_front;
+    back_version = group->version_back_back;
+  } else {
+    front_version = group->version_front_front;
+    back_version = group->version_front_back;
+  }
+  if (front_version != back_version) {
+    // not consistent, page is during split
+    printf("front_version %d back_version %d\n", front_version, back_version);
+    if (from_cache)
+      return false;
+    else
+      goto re_read;
+  } else {
+    bool res = group->find(k, result, !(bucket_id % 2));
+    // TODO: find, but version incorrect, invalidate cache
+    if (!res) {
+      if (leaf_version != front_version) {
+        // version doesn't match, page has been splitted, read header
+        auto header = (Header *)(page_buffer + offsetof(LeafPage, hdr));
         dsm_client_->ReadSync((char *)header,
                               GADD(page_addr, offsetof(LeafPage, hdr)),
                               sizeof(Header), cxt);
         if (k >= header->highest) {
           result.sibling = header->sibling_ptr;
           result.min = header->highest;
-          return true;
-        } else if (hash_offset != header->node_version) {
-          hash_offset = header->node_version;  // retry
-        } else {
-          // not exist
-          return true;
-        }
+        }  // else not exist
       }
     }
   }
+  return true;
+}
 
-  int counter = 0;
+bool Tree::page_search(GlobalAddress page_addr, int level_hint, int read_gran,
+                       Key min, Key max, const Key &k, SearchResult &result,
+                       CoroContext *cxt, int coro_id, bool from_cache) {
+  if (page_addr != g_root_ptr && level_hint == 0) {
+    return leaf_page_group_search(page_addr, k, result, cxt, coro_id,
+                                  from_cache);
+  }
+
+  auto page_buffer = (dsm_client_->get_rbuf(coro_id)).get_page_buffer();
+  auto header = (Header *)(page_buffer + offsetof(LeafPage, hdr));
+
+  int read_counter = 0;
 re_read:
-  if (++counter > 100) {
+  if (++read_counter > 10) {
     printf("re read too many times\n");
-    // sleep(1);
+    sleep(1);
     assert(false);
   }
 
@@ -1188,9 +1171,6 @@ re_read:
   if (result.is_leaf) {
     assert(page_addr.child_gran == 0);
     auto page = (LeafPage *)page_buffer;
-    if (!page->check_consistent()) {
-      goto re_read;
-    }
 
     if (from_cache &&
         (k < page->hdr.lowest || k >= page->hdr.highest)) {  // cache is stale
@@ -1206,15 +1186,19 @@ re_read:
       assert(false);
       return false;
     }
-    uint64_t hash_offset = page->hdr.node_version;
-    int bucket_id = key_hash_bucket(k, hash_offset);
-    int pos_start;
+    int bucket_id = key_hash_bucket(k);
+    LeafEntryGroup *g = &page->groups[bucket_id / 2];
+    // check consistency
     if (bucket_id % 2) {
-      pos_start = (bucket_id / 2) * kGroupSize + kAssociativity;
+      if (g->version_back_front != g->version_back_back) {
+        goto re_read;
+      }
     } else {
-      pos_start = (bucket_id / 2) * kGroupSize;
+      if (g->version_front_front != g->version_front_back) {
+        goto re_read;
+      }
     }
-    try_group_search(page->records + pos_start, k, result);
+    g->find(k, result, !(bucket_id % 2));
   } else {
     // Internal Page
     assert(!from_cache);
@@ -1259,6 +1243,11 @@ re_read:
       search_cnt = kInternalCardinality / 2 + 1;
     } else {
       search_cnt = kInternalCardinality + 1;
+    }
+    // check consistency
+    if (guard->ptr.group_node_version !=
+        (guard + search_cnt - 1)->ptr.group_node_version) {
+      goto re_read;
     }
     internal_page_slice_search(guard, search_cnt, k, result);
     // auto t = timer.end();
@@ -1785,41 +1774,61 @@ void Tree::internal_page_store_update_left_child(
 
 bool Tree::try_leaf_page_update(GlobalAddress page_addr,
                                 GlobalAddress lock_addr, const Key &k,
-                                const Value &v, uint64_t hash_offset,
-                                CoroContext *cxt, int coro_id, bool sx_lock) {
+                                const Value &v, CoroContext *cxt, int coro_id,
+                                bool sx_lock) {
   auto &rbuf = dsm_client_->get_rbuf(coro_id);
   uint64_t *cas_buffer = rbuf.get_cas_buffer();
   auto page_buffer = rbuf.get_page_buffer();
 
-  int bucket_id = key_hash_bucket(k, hash_offset);
-  int pos_start;
-  if (bucket_id % 2) {
-    pos_start = (bucket_id / 2) * kGroupSize + kAssociativity;
-  } else {
-    pos_start = (bucket_id / 2) * kGroupSize;
-  }
-
+  int bucket_id = key_hash_bucket(k);
+  int group_id = bucket_id / 2;
   int group_offset =
-      offsetof(LeafPage, records) + sizeof(LeafEntry) * pos_start;
-  lock_and_read_page(page_buffer + group_offset, GADD(page_addr, group_offset),
-                     sizeof(LeafEntry) * kAssociativity * 2, cas_buffer,
-                     lock_addr, cxt, coro_id, sx_lock);
-  auto page = (LeafPage *)page_buffer;
+      offsetof(LeafPage, groups) + sizeof(LeafEntryGroup) * group_id;
+  int bucket_offset = bucket_id % 2 ? kBackOffset : kFrontOffset;
 
+  lock_and_read_page(page_buffer + group_offset + bucket_offset,
+                     GADD(page_addr, group_offset + bucket_offset),
+                     kReadBucketSize, cas_buffer, lock_addr, cxt, coro_id,
+                     sx_lock);
+  // auto page = (LeafPage *)page_buffer;
+  LeafEntryGroup *g = (LeafEntryGroup *)(page_buffer + group_offset);
   char *update_addr = nullptr;
-  for (int i = pos_start; i < pos_start + kAssociativity * 2; ++i) {
-    auto &r = page->records[i];
-    if (r.value != kValueNull) {
-      if (r.key == k) {
-        r.value = v;
-        update_addr = (char *)&r;
+  if (bucket_id % 2) {
+    // back
+    for (int i = 0; i < kAssociativity; ++i) {
+      LeafEntry *p = &g->back[i];
+      if (p->value != kValueNull && p->key == k) {
+        p->value = v;
+        update_addr = (char *)p;
+        break;
+      }
+    }
+  } else {
+    // front
+    for (int i = 0; i < kAssociativity; ++i) {
+      LeafEntry *p = &g->front[i];
+      if (p->value != kValueNull && p->key == k) {
+        p->value = v;
+        update_addr = (char *)p;
         break;
       }
     }
   }
+  if (!update_addr) {
+    // overflow
+    for (int i = 0; i < kAssociativity - 1; ++i) {
+      LeafEntry *p = &g->overflow[i];
+      if (p->value != kValueNull && p->key == k) {
+        p->value = v;
+        update_addr = (char *)p;
+        break;
+      }
+    }
+  }
+
   if (update_addr) {
     write_page_and_unlock(
-        update_addr, GADD(page_addr, (update_addr - (char *)page)),
+        update_addr, GADD(page_addr, (update_addr - page_buffer)),
         sizeof(LeafEntry), cas_buffer, lock_addr, cxt, coro_id, false, sx_lock);
     return true;
   }
@@ -1830,9 +1839,8 @@ bool Tree::try_leaf_page_update(GlobalAddress page_addr,
 
 bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
                            const Value &v, GlobalAddress root, int level,
-                           uint64_t hash_offset, CoroContext *cxt, int coro_id,
-                           bool from_cache, bool sx_lock) {
-  // assert(hash_offset == page_addr.child_version);
+                           CoroContext *cxt, int coro_id, bool from_cache,
+                           bool sx_lock) {
   uint64_t lock_index = get_lock_index(page_addr);
 
   GlobalAddress lock_addr;
@@ -1850,8 +1858,8 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
 
   // try update hash group
   if (sx_lock) {
-    bool update_res = try_leaf_page_update(page_addr, lock_addr, k, v,
-                                           hash_offset, cxt, coro_id, sx_lock);
+    bool update_res =
+        try_leaf_page_update(page_addr, lock_addr, k, v, cxt, coro_id, sx_lock);
     if (update_res) {
       return true;
     }
@@ -1868,7 +1876,6 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   auto page = (LeafPage *)page_buffer;
 
   assert(page->hdr.level == level);
-  assert(page->check_consistent());
 
   if (from_cache &&
       (k < page->hdr.lowest || k >= page->hdr.highest)) {  // cache is stale
@@ -1889,13 +1896,13 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
 #endif
 
     assert(page->hdr.sibling_ptr != GlobalAddress::Null());
-    this->leaf_page_store(page->hdr.sibling_ptr, k, v, root, level, hash_offset,
-                          cxt, coro_id, false, sx_lock);
+    this->leaf_page_store(page->hdr.sibling_ptr, k, v, root, level, cxt,
+                          coro_id, false, sx_lock);
     return true;
   }
   assert(k >= page->hdr.lowest);
 
-  if (hash_offset != page->hdr.node_version) {
+  if (page_addr.child_version != page->hdr.node_version) {
     if (from_cache) {
 #ifdef USE_SX_LOCK
       this->unlock_sx_addr(lock_addr, cas_buffer, cxt, coro_id, true, sx_lock);
@@ -1905,53 +1912,60 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
       return false;
     } else {
       // when does this happen?
-      hash_offset = page->hdr.node_version;
-      page_addr.child_version = hash_offset;
+      page_addr.child_version = page->hdr.node_version;
     }
   }
 
   // hash-based
-  int empty_index = -1;
-  char *update_addr = nullptr;
-  int bucket_id = key_hash_bucket(k, hash_offset);
-  int pos_start, overflow_start;
+  LeafEntry *insert_addr = nullptr;
+  LeafEntry *update_addr = nullptr;
+  int bucket_id = key_hash_bucket(k);
+  LeafEntryGroup *g = &page->groups[bucket_id / 2];
   // [0, x, 1] [2, x, 3]
-  if (bucket_id % 2) {
-    // latter
-    pos_start = (bucket_id / 2) * kGroupSize + kAssociativity * 2;
-    overflow_start = pos_start - kAssociativity;
-  } else {
-    // former
-    pos_start = (bucket_id / 2) * kGroupSize;
-    overflow_start = pos_start + kAssociativity;
-  }
-
   // base bucket
-  for (int i = pos_start; i < pos_start + kAssociativity; ++i) {
-    auto &r = page->records[i];
-    if (r.value != kValueNull) {
-      if (r.key == k) {
-        r.value = v;
-        update_addr = (char *)&r;
-        break;
+  if (bucket_id % 2) {
+    // back
+    for (int i = 0; i < kAssociativity; ++i) {
+      // auto r = &g->back[i];
+      LeafEntry *p = &g->back[i];
+      if (p->value != kValueNull) {
+        if (p->key == k) {
+          p->value = v;
+          update_addr = p;
+          break;
+        }
+      } else if (!insert_addr) {
+        insert_addr = p;
       }
-    } else if (empty_index == -1) {
-      empty_index = i;
+    }
+  } else {
+    // front
+    for (int i = 0; i < kAssociativity; ++i) {
+      LeafEntry *p = &g->front[i];
+      if (p->value != kValueNull) {
+        if (p->key == k) {
+          p->value = v;
+          update_addr = p;
+          break;
+        }
+      } else if (!insert_addr) {
+        insert_addr = p;
+      }
     }
   }
 
   // overflow bucket
   if (update_addr == nullptr) {
-    for (int i = overflow_start; i < overflow_start + kAssociativity; ++i) {
-      auto &r = page->records[i];
-      if (r.value != kValueNull) {
-        if (r.key == k) {
-          r.value = v;
-          update_addr = (char *)&r;
+    for (int i = 0; i < kAssociativity - 1; ++i) {
+      LeafEntry *p = &g->overflow[i];
+      if (p->value != kValueNull) {
+        if (p->key == k) {
+          p->value = v;
+          update_addr = p;
           break;
         }
-      } else if (empty_index == -1) {
-        empty_index = i;
+      } else if (!insert_addr) {
+        insert_addr = p;
       }
     }
   }
@@ -1961,37 +1975,49 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
     // update to x lock
     if (sx_lock) {
       this->unlock_s_addr(lock_addr, cas_buffer, cxt, coro_id, true);
-      return this->leaf_page_store(page_addr, k, v, root, level, hash_offset,
-                                   cxt, coro_id, from_cache, false);
+      return this->leaf_page_store(page_addr, k, v, root, level, cxt, coro_id,
+                                   from_cache, false);
     }
 #endif
 
-    if (empty_index != -1) {
-      auto &r = page->records[empty_index];
-      r.key = k;
-      r.value = v;
-      // r.f_version++;
-      // r.r_version = r.f_version;
-      update_addr = (char *)&r;
+    if (insert_addr) {
+      insert_addr->key = k;
+      insert_addr->value = v;
+      update_addr = insert_addr;
     }
     // cnt++;
   }
 
   if (update_addr) {
-    write_page_and_unlock(
-        update_addr, GADD(page_addr, (update_addr - (char *)page)),
-        sizeof(LeafEntry), cas_buffer, lock_addr, cxt, coro_id, false, sx_lock);
-
+    write_page_and_unlock((char *)update_addr,
+                          GADD(page_addr, ((char *)update_addr - page_buffer)),
+                          sizeof(LeafEntry), cas_buffer, lock_addr, cxt,
+                          coro_id, false, sx_lock);
     return true;
   }
 
   // split
-
   LeafEntry tmp_records[kLeafCardinality];
   int cnt = 0;
-  for (int i = 0; i < kLeafCardinality; ++i) {
-    if (page->records[i].value != kValueNull) {
-      tmp_records[cnt++] = page->records[i];
+  // for (int i = 0; i < kLeafCardinality; ++i) {
+  //   if (page->records[i].value != kValueNull) {
+  //     tmp_records[cnt++] = page->records[i];
+  //   }
+  // }
+  for (int i = 0; i < kNumGroup; ++i) {
+    LeafEntryGroup *g = &page->groups[i];
+    for (int j = 0; j < kAssociativity; ++j) {
+      if (g->front[j].value != kValueNull) {
+        tmp_records[cnt++] = g->front[j];
+      }
+      if (g->back[j].value != kValueNull) {
+        tmp_records[cnt++] = g->back[j];
+      }
+    }
+    for (int j = 0; j < kAssociativity - 1; ++j) {
+      if (g->overflow[j].value != kValueNull) {
+        tmp_records[cnt++] = g->overflow[j];
+      }
     }
   }
   std::sort(tmp_records, tmp_records + cnt);
@@ -2010,26 +2036,26 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   assert(split_key > page->hdr.lowest);
   assert(split_key < page->hdr.highest);
 
-  memset(reinterpret_cast<void *>(page->records), 0,
-         sizeof(LeafEntry) * kLeafCardinality);
-  page->update_hash_offset();
-  uint64_t page_new_hash_offset = page->hdr.node_version;
+  // memset(reinterpret_cast<void *>(page->records), 0,
+  //        sizeof(LeafEntry) * kLeafCardinality);
+  memset(reinterpret_cast<void *>(page->groups), 0, sizeof(page->groups));
+  page_addr.child_version = page->update_node_version();
   for (int i = 0; i < m; ++i) {
-    int bucket_id = key_hash_bucket(tmp_records[i].key, page_new_hash_offset);
-    page->insert_for_split(tmp_records[i].key, tmp_records[i].value, bucket_id);
+    int bucket_id = key_hash_bucket(tmp_records[i].key);
+    page->groups[bucket_id / 2].insert(tmp_records[i].key, tmp_records[i].value,
+                                       !(bucket_id % 2));
   }
   for (int i = m; i < cnt; ++i) {
-    int bucket_id = key_hash_bucket(tmp_records[i].key, hash_offset);
-    sibling->insert_for_split(tmp_records[i].key, tmp_records[i].value,
-                              bucket_id);
+    int bucket_id = key_hash_bucket(tmp_records[i].key);
+    sibling->groups[bucket_id / 2].insert(
+        tmp_records[i].key, tmp_records[i].value, !(bucket_id % 2));
   }
 
   sibling->hdr.lowest = split_key;
   sibling->hdr.highest = page->hdr.highest;
   page->hdr.highest = split_key;
 
-  sibling->hdr.node_version = hash_offset;
-  sibling_addr.child_version = hash_offset;
+  sibling_addr.child_version = sibling->hdr.node_version;
 
   // link
   sibling->hdr.sibling_ptr = page->hdr.sibling_ptr;
@@ -2037,23 +2063,19 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
 
   // insert k
   bool res;
-
   if (k < split_key) {
-    int bucket_id = key_hash_bucket(k, page_new_hash_offset);
-    res = page->insert_for_split(k, v, bucket_id);
+    int bucket_id = key_hash_bucket(k);
+    res = page->groups[bucket_id / 2].insert(k, v, !(bucket_id % 2));
   } else {
-    int bucket_id = key_hash_bucket(k, hash_offset);
-    res = sibling->insert_for_split(k, v, bucket_id);
+    int bucket_id = key_hash_bucket(k);
+    res = sibling->groups[bucket_id / 2].insert(k, v, !(bucket_id % 2));
   }
 
-  sibling->set_consistent();
   if (sibling_addr.nodeID == page_addr.nodeID) {
     dsm_client_->Write(sibling_buf, sibling_addr, kLeafPageSize, false);
   } else {
     dsm_client_->WriteSync(sibling_buf, sibling_addr, kLeafPageSize, cxt);
   }
-
-  page->set_consistent();
 
   if (root == page_addr) {
     page->hdr.is_root = false;
@@ -2063,9 +2085,8 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   write_page_and_unlock(page_buffer, page_addr, kLeafPageSize, cas_buffer,
                         lock_addr, cxt, coro_id, true, sx_lock);
 
-  page_addr.child_version = page->hdr.node_version;
-  assert(page_addr.child_version % 2 == 0);
-  assert(sibling_addr.child_version % 2 == 0);
+  // assert(page_addr.child_version % 2 == 0);
+  // assert(sibling_addr.child_version % 2 == 0);
   if (root == page_addr) {  // update root
     if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
                         cxt, coro_id)) {
@@ -2114,7 +2135,6 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
   auto page = (LeafPage *)page_buffer;
 
   assert(page->hdr.level == level);
-  assert(page->check_consistent());
 
   if (from_cache &&
       (k < page->hdr.lowest || k >= page->hdr.highest)) {  // cache is stale
@@ -2139,22 +2159,48 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
 
   assert(k >= page->hdr.lowest);
 
-  char *update_addr = nullptr;
-  for (int i = 0; i < kLeafCardinality; ++i) {
-    auto &r = page->records[i];
-    if (r.key == k && r.value != kValueNull) {
-      r.value = kValueNull;
-      // r.f_version++;
-      // r.r_version = r.f_version;
-      update_addr = (char *)&r;
-      break;
+  LeafEntry *update_addr = nullptr;
+  int bucket_id = key_hash_bucket(k);
+  LeafEntryGroup *g = &page->groups[bucket_id / 2];
+  if (bucket_id % 2) {
+    // back
+    for (int i = 0; i < kAssociativity; ++i) {
+      LeafEntry *p = &g->back[i];
+      if (p->key == k) {
+        p->value = kValueNull;
+        update_addr = p;
+        break;
+      }
+    }
+  } else {
+    // front
+    for (int i = 0; i < kAssociativity; ++i) {
+      LeafEntry *p = &g->front[i];
+      if (p->key == k) {
+        p->value = kValueNull;
+        update_addr = p;
+        break;
+      }
+    }
+  }
+
+  // overflow
+  if (update_addr == nullptr) {
+    for (int i = 0; i < kAssociativity - 1; ++i) {
+      LeafEntry *p = &g->overflow[i];
+      if (p->key == k) {
+        p->value = kValueNull;
+        update_addr = p;
+        break;
+      }
     }
   }
 
   if (update_addr) {
-    write_page_and_unlock(
-        update_addr, GADD(page_addr, (update_addr - (char *)page)),
-        sizeof(LeafEntry), cas_buffer, lock_addr, cxt, coro_id, false, false);
+    write_page_and_unlock((char *)update_addr,
+                          GADD(page_addr, ((char *)update_addr - (char *)page)),
+                          sizeof(LeafEntry), cas_buffer, lock_addr, cxt,
+                          coro_id, false, false);
   } else {
     this->unlock_addr(lock_addr, cas_buffer, cxt, coro_id, false);
   }
