@@ -90,7 +90,8 @@ constexpr uint64_t kLockChipMemSize = 256 * 1024;
 // number of locks
 // we do not use 16-bit locks, since 64-bit locks can provide enough concurrency.
 // if you want to use 16-bit locks, call *cas_dm_mask*
-constexpr uint64_t kNumOfLock = kLockChipMemSize / sizeof(uint64_t);
+constexpr uint64_t kLockSize = 16;
+constexpr uint64_t kNumOfLock = kLockChipMemSize / kLockSize;
 
 // level of tree
 constexpr uint64_t kMaxLevelOfTree = 7;

@@ -36,3 +36,18 @@ void DSMServer::InitRdmaConnection() {
   keeper_ = new DSMServerKeeper(dir_con_, conn_to_client_, conf_.num_client);
   my_server_id_ = keeper_->get_my_server_id();
 }
+
+void DSMServer::Run() {
+  for (int i = 1; i < NR_DIRECTORY; ++i) {
+    dir_agent_[i]->dirTh =
+        new std::thread(&Directory::dirThread, dir_agent_[i]);
+  }
+
+  dir_agent_[0]->dirThread();
+  for (int i = 1; i < NR_DIRECTORY; ++i) {
+    dir_agent_[i]->stop_flag.store(true, std::memory_order_release);
+    if (dir_agent_[i]->dirTh->joinable()) {
+      dir_agent_[i]->dirTh->join();
+    }
+  }
+}

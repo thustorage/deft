@@ -6,7 +6,7 @@
 
 GlobalAddress g_root_ptr = GlobalAddress::Null();
 int g_root_level = -1;
-bool enable_cache = false;
+bool enable_cache = true;
 
 Directory::Directory(DirectoryConnection *dCon, uint16_t dirID, uint16_t nodeID)
     : dCon(dCon), dirID(dirID), nodeID(nodeID), dirTh(nullptr) {
@@ -18,7 +18,7 @@ Directory::Directory(DirectoryConnection *dCon, uint16_t dirID, uint16_t nodeID)
     chunckAlloc = new GlobalAllocator(dsm_start, per_directory_dsm_size);
   }
 
-  dirTh = new std::thread(&Directory::dirThread, this);
+  // dirTh = new std::thread(&Directory::dirThread, this);
 }
 
 Directory::~Directory() { delete chunckAlloc; }
@@ -28,7 +28,7 @@ void Directory::dirThread() {
   // bindCore(31 - dirID);
   Debug::notifyInfo("thread %d in memory nodes runs...\n", dirID);
 
-  while (true) {
+  while (!stop_flag.load(std::memory_order_acquire)) {
     struct ibv_wc wc;
     pollWithCQ(dCon->cq, 1, &wc);
 
@@ -73,10 +73,15 @@ void Directory::process_message(const RawMessage *m) {
       g_root_ptr = m->addr;
       g_root_level = m->level;
       if (g_root_level >= 3) {
-        enable_cache = false;
+        enable_cache = true;
       }
     }
 
+    break;
+  }
+
+  case RpcType::TERMINATE: {
+    stop_flag.store(true, std::memory_order_release);
     break;
   }
 

@@ -143,6 +143,7 @@ void DSMServerKeeper::ConnectClients() {
       ConnectClient(k);
       printf("I connect client %zu\n", k);
     }
+    fflush(stdout);
     cur_clients = client_num;
   }
 }

@@ -10,6 +10,7 @@ enum RpcType : uint8_t {
   MALLOC,
   FREE,
   NEW_ROOT,
+  TERMINATE,
   NOP,
 };
 

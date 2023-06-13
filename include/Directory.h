@@ -2,8 +2,8 @@
 #define __DIRECTORY_H__
 
 #include <thread>
-
 #include <unordered_map>
+#include <atomic>
 
 #include "Common.h"
 
@@ -18,8 +18,9 @@ class Directory {
   Directory(DirectoryConnection *dCon, uint16_t dirID, uint16_t nodeID);
 
   ~Directory();
+  std::atomic_bool stop_flag{false};
 
- private:
+//  private:
   DirectoryConnection *dCon;
 
   // uint32_t machineNR;

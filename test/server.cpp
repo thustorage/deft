@@ -1,3 +1,5 @@
+#define STRIP_FLAG_HELP 1    // this must go before the #include!
+#include <gflags/gflags.h>
 #include "Timer.h"
 #include "Tree.h"
 #include "zipf.h"
@@ -13,9 +15,8 @@
 
 //////////////////// workload parameters /////////////////////
 
-int kServerCount;
-int kClientCount;
-int kThreadCount;
+DEFINE_int32(server_count, 1, "server count");
+DEFINE_int32(client_count, 1, "client count");
 // int kReadRatio;
 // double zipfan = 0;
 
@@ -24,33 +25,21 @@ int kThreadCount;
 
 DSMServer *dsm_server;
 
-void parse_args(int argc, char *argv[]) {
-  if (argc < 4) {
-    printf("Usage: ./server kServerCount kClientCount kThreadCount\n");
-    exit(-1);
-  }
-
-  kServerCount = atoi(argv[1]);
-  kClientCount = atoi(argv[2]);
-  kThreadCount = atoi(argv[3]);
-  // kReadRatio = atoi(argv[4]);
-  // zipfan = atof(argv[5]);
-
-  printf("kServerCount %d, kClientCount %d, kThreadCount %d\n", kServerCount,
-         kClientCount, kThreadCount);
+void print_args() {
+  printf("ServerCount %d, ClientCount %d\n", FLAGS_server_count,
+         FLAGS_client_count);
 }
 
 int main(int argc, char *argv[]) {
-
-  parse_args(argc, argv);
+  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  print_args();
 
   DSMConfig config;
-  config.num_server = kServerCount;
-  config.num_client = kClientCount;
+  config.num_server = FLAGS_server_count;
+  config.num_client = FLAGS_client_count;
   dsm_server = DSMServer::GetInstance(config);
 
-  while (true)
-    ;
+  dsm_server->Run();
 
   return 0;
 }

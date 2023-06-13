@@ -45,9 +45,12 @@ public:
     this->buffer = buffer;
     cas_buffer = (uint64_t *)buffer;
     unlock_buffer =
-        (uint64_t *)((char *)cas_buffer + sizeof(uint64_t) * kCasBufferCnt);
-    zero_64bit = (uint64_t *)((char *)unlock_buffer + sizeof(uint64_t));
-    page_buffer = (char *)zero_64bit + sizeof(uint64_t);
+        (uint64_t *)((char *)cas_buffer + 64 * kCasBufferCnt);
+    zero_64bit = (uint64_t *)((char *)unlock_buffer + 64);
+    // page_buffer = (char *)zero_64bit + sizeof(uint64_t);
+    page_buffer =
+        (char *)((uintptr_t)(zero_64bit + sizeof(uint64_t) + kPageSize - 1) &
+                 ~(uintptr_t)(kPageSize - 1));
     sibling_buffer = (char *)page_buffer + kPageSize * kPageBufferCnt;
     entry_buffer = (char *)sibling_buffer + kPageSize * kSiblingBufferCnt;
     *zero_64bit = 0;
@@ -57,7 +60,7 @@ public:
 
   uint64_t *get_cas_buffer() {
     cas_buffer_cur = (cas_buffer_cur + 1) % kCasBufferCnt;
-    return cas_buffer + cas_buffer_cur;
+    return (uint64_t *)((char *)cas_buffer + cas_buffer_cur * 64);
   }
 
   uint64_t *get_unlock_buffer() const { return unlock_buffer; }

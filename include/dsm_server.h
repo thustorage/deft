@@ -15,6 +15,8 @@ class DSMServer {
     return &server;
   }
 
+  void Run();
+
  private:
   DSMConfig conf_;
   uint64_t base_addr_;

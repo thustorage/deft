@@ -21,6 +21,7 @@ struct GlobalAddress {
 
   operator uint64_t() { return val; }
 
+  // remain self group_gran and group_node_version!
   GlobalAddress &operator=(const GlobalAddress &other) {
     uint8_t old_group_gran = group_gran;
     uint8_t old_group_node_version = group_node_version;
