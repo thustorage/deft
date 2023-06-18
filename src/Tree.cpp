@@ -37,7 +37,6 @@ constexpr uint64_t ADD_S_UNLOCK[3] = {1ul << 16, 1ul << 48, 1ul << 16};
 constexpr uint64_t ADD_X_LOCK = 1ul << 32;
 constexpr uint64_t ADD_X_UNLOCK = 1ul << 48;
 
-thread_local Timer timer;
 thread_local std::queue<uint16_t> hot_wait_queue;
 
 Tree::Tree(DSMClient *dsm_client, uint16_t tree_id)
@@ -74,6 +73,8 @@ Tree::Tree(DSMClient *dsm_client, uint16_t tree_id)
     // std::cout << "fail\n";
   }
 }
+
+Tree::~Tree() { delete index_cache; }
 
 void Tree::print_verbose() {
   constexpr int kLeafHdrOffset = offsetof(LeafPage, hdr);
@@ -871,8 +872,7 @@ void Tree::insert(const Key &k, const Value &v, CoroContext *ctx, int coro_id) {
 
   if (enable_cache) {
     GlobalAddress cache_addr, parent_addr;
-    auto entry = index_cache->search_from_cache(
-        k, &cache_addr, &parent_addr, dsm_client_->get_my_thread_id() == 0);
+    auto entry = index_cache->search_from_cache(k, &cache_addr, &parent_addr);
     if (entry) {  // cache hit
       path_stack[coro_id][1] = parent_addr;
       auto root = get_root_ptr(ctx, coro_id);
@@ -888,7 +888,7 @@ void Tree::insert(const Key &k, const Value &v, CoroContext *ctx, int coro_id) {
         return;
       }
       // cache stale, from root,
-      index_cache->invalidate(entry);
+      index_cache->invalidate(entry, dsm_client_->get_my_thread_id());
     }
     cache_miss[dsm_client_->get_my_thread_id()][0]++;
   }
@@ -960,8 +960,7 @@ bool Tree::search(const Key &k, Value &v, CoroContext *ctx, int coro_id) {
     // Timer timer;
     // timer.begin();
     GlobalAddress cache_addr, parent_addr;
-    entry = index_cache->search_from_cache(
-        k, &cache_addr, &parent_addr, dsm_client_->get_my_thread_id() == 0);
+    entry = index_cache->search_from_cache(k, &cache_addr, &parent_addr);
     if (entry) {  // cache hit
       cache_hit[dsm_client_->get_my_thread_id()][0]++;
       from_cache = true;
@@ -979,7 +978,7 @@ next:
   if (!page_search(p, level_hint, p.child_gran, min, max, k, result, ctx,
                    coro_id, from_cache)) {
     if (from_cache) {  // cache stale
-      index_cache->invalidate(entry);
+      index_cache->invalidate(entry, dsm_client_->get_my_thread_id());
       cache_hit[dsm_client_->get_my_thread_id()][0]--;
       cache_miss[dsm_client_->get_my_thread_id()][0]++;
       from_cache = false;
@@ -1111,15 +1110,14 @@ void Tree::del(const Key &k, CoroContext *ctx, int coro_id) {
 
   if (enable_cache) {
     GlobalAddress cache_addr, parent_addr;
-    auto entry = index_cache->search_from_cache(
-        k, &cache_addr, &parent_addr, dsm_client_->get_my_thread_id() == 0);
+    auto entry = index_cache->search_from_cache(k, &cache_addr, &parent_addr);
     if (entry) {  // cache hit
       if (leaf_page_del(cache_addr, k, 0, ctx, coro_id, true)) {
         cache_hit[dsm_client_->get_my_thread_id()][0]++;
         return;
       }
       // cache stale, from root,
-      index_cache->invalidate(entry);
+      index_cache->invalidate(entry, dsm_client_->get_my_thread_id());
     }
     cache_miss[dsm_client_->get_my_thread_id()][0]++;
   }
@@ -1333,7 +1331,7 @@ re_read:
     auto page = (InternalPage *)page_buffer;
     if (read_gran == gran_full) {
       if (result.level == 1 && enable_cache) {
-        index_cache->add_to_cache(page);
+        index_cache->add_to_cache(page, dsm_client_->get_my_thread_id());
       }
       if (k >= page->hdr.highest) {  // should turn right
         result.sibling = page->hdr.sibling_ptr;
@@ -1362,7 +1360,8 @@ re_read:
     } else {
       if (result.level == 1 && enable_cache) {
         index_cache->add_sub_node(page_addr, guard, start_offset, group_id,
-                                  read_gran, min, max);
+                                  read_gran, min, max,
+                                  dsm_client_->get_my_thread_id());
       }
     }
 
@@ -1908,7 +1907,7 @@ void Tree::internal_page_store_update_left_child(
                      GADD(page_addr, modify_offset), modify_size, cas_buffer,
                      lock_addr, 0, ctx, coro_id, true, false);
     if (level == 1 && enable_cache) {
-      index_cache->add_to_cache(page);
+      index_cache->add_to_cache(page, dsm_client_->get_my_thread_id());
     }
   } else {
     // current group is full, need span
@@ -1967,7 +1966,7 @@ void Tree::internal_page_store_update_left_child(
                             level + 1);
       }
       if (level == 1 && enable_cache) {
-        index_cache->add_to_cache(page);
+        index_cache->add_to_cache(page, dsm_client_->get_my_thread_id());
       }
     } else {
       // need split and insert
@@ -2024,8 +2023,8 @@ void Tree::internal_page_store_update_left_child(
       }
 
       if (level == 1 && enable_cache) {
-        index_cache->add_to_cache(page);
-        index_cache->add_to_cache(sibling);
+        index_cache->add_to_cache(page, dsm_client_->get_my_thread_id());
+        index_cache->add_to_cache(sibling, dsm_client_->get_my_thread_id());
       }
     }
   }

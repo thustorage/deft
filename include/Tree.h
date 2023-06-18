@@ -593,6 +593,7 @@ class LeafPage {
 class Tree {
  public:
   Tree(DSMClient *dsm, uint16_t tree_id = 0);
+  ~Tree();
 
   void insert(const Key &k, const Value &v, CoroContext *ctx = nullptr,
               int coro_id = 0);

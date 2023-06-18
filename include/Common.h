@@ -24,7 +24,7 @@
 
 #define LATENCY_WINDOWS 1000000
 
-#define STRUCT_OFFSET(type, field)                                             \
+#define STRUCT_OFFSET(type, field) \
   (char *)&((type *)(0))->field - (char *)((type *)(0))
 
 #define MAX_MACHINE 8
@@ -38,7 +38,7 @@
 #define RAW_RECV_CQ_COUNT 128
 
 // { app thread
-#define MAX_APP_THREAD 30
+#define MAX_APP_THREAD 32
 
 #define APP_MESSAGE_NR 96
 
@@ -101,7 +101,7 @@ constexpr int64_t kPerCoroRdmaBuf = 128 * 1024;
 
 constexpr uint8_t kMaxHandOverTime = 0;
 
-constexpr int kIndexCacheSize = 1000; // MB
+constexpr int kIndexCacheSize = 500; // MB
 } // namespace define
 
 static inline unsigned long long asm_rdtsc(void) {

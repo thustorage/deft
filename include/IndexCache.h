@@ -1,7 +1,8 @@
 #pragma once
 
 #include <atomic>
-#include <queue>
+// #include <queue>
+#include <list>
 #include <vector>
 
 #include "CacheEntry.h"
@@ -14,16 +15,22 @@ extern bool enter_debug;
 
 using CacheSkipList = InlineSkipList<CacheEntryComparator>;
 
+struct alignas(64) DelayFreeList {
+  std::list<std::pair<void *, uint64_t>> list;
+  WRLock lock;
+};
+
 class IndexCache {
  public:
   IndexCache(int cache_size);
+  ~IndexCache();
 
-  bool add_to_cache(InternalPage *page);
+  bool add_to_cache(InternalPage *page, int thread_id);
   bool add_sub_node(GlobalAddress addr, InternalEntry *guard, int guard_offset,
-                    int group_id, int granularity, Key min, Key max);
+                    int group_id, int granularity, Key min, Key max,
+                    int thread_id);
   const CacheEntry *search_from_cache(const Key &k, GlobalAddress *addr,
-                                      GlobalAddress *parent_addr,
-                                      bool is_leader = false);
+                                      GlobalAddress *parent_addr);
 
   void search_range_from_cache(const Key &from, const Key &to,
                                std::vector<InternalPage *> &result);
@@ -32,7 +39,7 @@ class IndexCache {
   const CacheEntry *find_entry(const Key &k);
   // const CacheEntry *find_entry(const Key &from, const Key &to);
 
-  bool invalidate(const CacheEntry *entry);
+  bool invalidate(const CacheEntry *entry, int thread_id);
 
   const CacheEntry *get_a_random_entry(uint64_t &freq);
 
@@ -40,21 +47,28 @@ class IndexCache {
 
   void bench();
 
+  void free_delay();
+
  private:
   uint64_t cache_size;  // MB;
   std::atomic<int64_t> free_page_cnt;
   std::atomic<int64_t> skiplist_node_cnt;
+  std::atomic<uint64_t> max_key{0};
   int64_t all_page_cnt;
 
-  std::queue<std::pair<void *, uint64_t>> delay_free_list;
-  WRLock free_lock;
+  // std::queue<std::pair<void *, uint64_t>> delay_free_list;
+  // WRLock free_lock;
+
+  DelayFreeList delay_free_lists[MAX_APP_THREAD];
+  std::atomic_bool delay_free_stop_flag{false};
+  std::thread free_delay_thread_;
 
   // SkipList
   CacheSkipList *skiplist;
   CacheEntryComparator cmp;
   Allocator alloc;
 
-  void evict_one();
+  void evict_one(int thread_id);
 };
 
 inline IndexCache::IndexCache(int cache_size) : cache_size(cache_size) {
@@ -64,6 +78,15 @@ inline IndexCache::IndexCache(int cache_size) : cache_size(cache_size) {
   all_page_cnt = memory_size / kInternalPageSize;
   free_page_cnt.store(all_page_cnt);
   skiplist_node_cnt.store(0);
+  free_delay_thread_ = std::thread(&IndexCache::free_delay, this);
+}
+
+IndexCache::~IndexCache() {
+  delay_free_stop_flag.store(true, std::memory_order_release);
+  if (free_delay_thread_.joinable()) {
+    free_delay_thread_.join();
+  }
+  delete skiplist;
 }
 
 inline bool IndexCache::add_entry(const Key &from, InternalPage *ptr) {
@@ -74,7 +97,11 @@ inline bool IndexCache::add_entry(const Key &from, InternalPage *ptr) {
   // e.to = to - 1; // !IMPORTANT;
   e.ptr = ptr;
 
-  return skiplist->InsertConcurrently(buf);
+  bool res = skiplist->InsertConcurrently(buf);
+  if (res && from > max_key.load(std::memory_order_acquire)) {
+    max_key.store(from, std::memory_order_release);
+  }
+  return res;
 }
 
 inline const CacheEntry *IndexCache::find_entry(const Key &from) {
@@ -92,7 +119,7 @@ inline const CacheEntry *IndexCache::find_entry(const Key &from) {
   }
 }
 
-inline bool IndexCache::add_to_cache(InternalPage *page) {
+inline bool IndexCache::add_to_cache(InternalPage *page, int thread_id) {
   auto new_page =
       (InternalPage *)aligned_alloc(kInternalPageSize, kInternalPageSize);
   memcpy(reinterpret_cast<void *>(new_page), page, sizeof(InternalPage));
@@ -103,7 +130,7 @@ inline bool IndexCache::add_to_cache(InternalPage *page) {
     skiplist_node_cnt.fetch_add(1);
     auto v = free_page_cnt.fetch_add(-1);
     if (v <= 0) {
-      evict_one();
+      evict_one(thread_id);
     }
 
     return true;
@@ -116,12 +143,13 @@ inline bool IndexCache::add_to_cache(InternalPage *page) {
         if (ptr == nullptr) {
           auto v = free_page_cnt.fetch_add(-1);
           if (v <= 0) {
-            evict_one();
+            evict_one(thread_id);
           }
         } else {
-          free_lock.wLock();
-          delay_free_list.push(std::make_pair(ptr, asm_rdtsc()));
-          free_lock.wUnlock();
+          delay_free_lists[thread_id].lock.wLock();
+          delay_free_lists[thread_id].list.push_back(
+              std::make_pair(ptr, asm_rdtsc()));
+          delay_free_lists[thread_id].lock.wUnlock();
         }
         return true;
       }
@@ -134,7 +162,8 @@ inline bool IndexCache::add_to_cache(InternalPage *page) {
 
 inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
                                      int guard_offset, int group_id,
-                                     int granularity, Key min, Key max) {
+                                     int granularity, Key min, Key max,
+                                     int thread_id) {
   auto new_page =
       (InternalPage *)aligned_alloc(kInternalPageSize, kInternalPageSize);
   // memset(new_page, 0, kInternalPageSize);
@@ -178,12 +207,13 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
       if (ptr == nullptr) {
         auto v = free_page_cnt.fetch_add(-1);
         if (v <= 0) {
-          evict_one();
+          evict_one(thread_id);
         }
       } else {
-        free_lock.wLock();
-        delay_free_list.push(std::make_pair(ptr, asm_rdtsc()));
-        free_lock.wUnlock();
+        delay_free_lists[thread_id].lock.wLock();
+        delay_free_lists[thread_id].list.push_back(
+            std::make_pair(ptr, asm_rdtsc()));
+        delay_free_lists[thread_id].lock.wUnlock();
       }
       return true;
     }
@@ -204,7 +234,7 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
       skiplist_node_cnt.fetch_add(1);
       auto v = free_page_cnt.fetch_add(-1);
       if (v <= 0) {
-        evict_one();
+        evict_one(thread_id);
       }
       return true;
     }
@@ -214,20 +244,7 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
 }
 
 inline const CacheEntry *IndexCache::search_from_cache(
-    const Key &k, GlobalAddress *addr, GlobalAddress *parent_addr,
-    bool is_leader) {
-  // notice: please ensure the thread 0 can make progress
-  if (is_leader &&
-      !delay_free_list.empty()) {  // try to free a page in the delay-free-list
-    free_lock.wLock();
-    auto p = delay_free_list.front();
-    if (asm_rdtsc() - p.second > 5000ul * 10) {
-      free(p.first);
-      delay_free_list.pop();
-    }
-    free_lock.wUnlock();
-  }
-
+    const Key &k, GlobalAddress *addr, GlobalAddress *parent_addr) {
   auto entry = find_entry(k);
 
   InternalPage *page = entry ? entry->ptr : nullptr;
@@ -301,7 +318,7 @@ inline void IndexCache::search_range_from_cache(
   }
 }
 
-inline bool IndexCache::invalidate(const CacheEntry *entry) {
+inline bool IndexCache::invalidate(const CacheEntry *entry, int thread_id) {
   auto ptr = entry->ptr;
 
   if (ptr == nullptr) {
@@ -309,9 +326,10 @@ inline bool IndexCache::invalidate(const CacheEntry *entry) {
   }
 
   if (__sync_bool_compare_and_swap(&(entry->ptr), ptr, 0)) {
-    free_lock.wLock();
-    delay_free_list.push(std::make_pair(ptr, asm_rdtsc()));
-    free_lock.wUnlock();
+    delay_free_lists[thread_id].lock.wLock();
+    delay_free_lists[thread_id].list.push_back(
+        std::make_pair(ptr, asm_rdtsc()));
+    delay_free_lists[thread_id].lock.wUnlock();
     free_page_cnt.fetch_add(1);
     return true;
   }
@@ -321,34 +339,36 @@ inline bool IndexCache::invalidate(const CacheEntry *entry) {
 
 inline const CacheEntry *IndexCache::get_a_random_entry(uint64_t &freq) {
   uint32_t seed = asm_rdtsc();
-  GlobalAddress tmp_addr, tmp_parent_addr;
 retry:
-  auto k = rand_r(&seed) % (1000ull * define::MB);
-  auto e = this->search_from_cache(k, &tmp_addr, &tmp_parent_addr);
-  if (!e) {
-    goto retry;
-  }
-  auto ptr = e->ptr;
-  if (!ptr) {
-    goto retry;
-  }
+  auto k = rand_r(&seed) % max_key.load(std::memory_order_relaxed);
+  CacheSkipList::Iterator iter(skiplist);
+  CacheEntry tmp;
+  tmp.from = k;
+  iter.Seek((char *)&tmp);
 
-  freq = ptr->hdr.index_cache_freq;
-  if (e->ptr != ptr) {
-    goto retry;
+  while (iter.Valid()) {
+    CacheEntry *e = (CacheEntry *)iter.key();
+    InternalPage *ptr = e ? e->ptr : nullptr;
+    if (ptr) {
+      freq = ptr->hdr.index_cache_freq;
+      if (e->ptr == ptr) {
+        return e;
+      }
+    }
+    iter.Next();
   }
-  return e;
+  goto retry;
 }
 
-inline void IndexCache::evict_one() {
+inline void IndexCache::evict_one(int thread_id) {
   uint64_t freq1, freq2;
   auto e1 = get_a_random_entry(freq1);
   auto e2 = get_a_random_entry(freq2);
 
   if (freq1 < freq2) {
-    invalidate(e1);
+    invalidate(e1, thread_id);
   } else {
-    invalidate(e2);
+    invalidate(e2, thread_id);
   }
 }
 
@@ -368,4 +388,27 @@ inline void IndexCache::bench() {
   }
 
   t.end_print(loop);
+}
+
+
+void IndexCache::free_delay() {
+  std::list<std::pair<void *, uint64_t>> local_list;
+
+  while (!delay_free_stop_flag.load(std::memory_order_acquire)) {
+    for (int i = 0; i < MAX_APP_THREAD; ++i) {
+      delay_free_lists[i].lock.wLock();
+      local_list.splice(local_list.end(), delay_free_lists[i].list);
+      delay_free_lists[i].lock.wUnlock();
+    }
+    auto it = local_list.begin();
+    for (; it != local_list.end(); ++it) {
+      if (asm_rdtsc() - it->second > 5000ul * 10) {
+        free(it->first);
+      } else {
+        break;
+      }
+    }
+    local_list.erase(local_list.begin(), it);  // erase not include it
+    usleep(5);
+  }
 }

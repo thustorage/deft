@@ -27,7 +27,7 @@ def exec_command(command):
 
 subprocess.run(f'make -j', shell=True)
 
-total_threads_arr = [1] + [i for i in range(9, 99, 9)]
+total_threads_arr = [i for i in range(9, 99, 9)]
 print(total_threads_arr)
 
 num_core_per_server = 18

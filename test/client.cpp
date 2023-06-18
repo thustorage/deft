@@ -10,6 +10,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <vector>
+#include <random>
 
 
 //////////////////// workload parameters /////////////////////
@@ -26,7 +27,7 @@ DEFINE_int32(read_ratio, 100, "read ratio");
 DEFINE_int32(key_space, 200 * 1e6, "key space");
 DEFINE_int32(ops_per_thread, 10 * 1e6, "ops per thread");
 DEFINE_double(warm_ratio, 1, "warm ratio");
-DEFINE_double(zipf, 0.99, "zipf");
+DEFINE_double(zipf, 0., "zipf");
 
 //////////////////// workload parameters /////////////////////
 
@@ -91,22 +92,35 @@ void thread_run(int id) {
   uint64_t all_thread = FLAGS_thread_count * dsm_client->get_client_size();
 
   Timer timer;
-  if (id == 0) {
-    timer.begin();
-  }
+  // warmup
+  { // to free vector automatically
+    uint64_t end_warm_key = FLAGS_warm_ratio * FLAGS_key_space;
+    uint64_t begin_warm_key;
+    if (my_id == 0) {
+      begin_warm_key = all_thread;
+    } else {
+      begin_warm_key = my_id;
+    }
+    // for (uint64_t i = begin_warm_key; i < end_warm_key; i += all_thread) {
+    //   tree->insert(to_key(i), i * 2);
+    // }
+    std::vector<uint64_t> warm_keys;
+    warm_keys.reserve((end_warm_key - begin_warm_key) / all_thread + 1);
+    for (uint64_t i = begin_warm_key; i < end_warm_key; i += all_thread) {
+      warm_keys.push_back(i + 1);
+    }
 
-  uint64_t end_warm_key = FLAGS_warm_ratio * FLAGS_key_space;
-  uint64_t begin_warm_key;
-  if (my_id == 0) {
-    begin_warm_key = all_thread;
-  } else {
-    begin_warm_key = my_id;
-  }
-  for (uint64_t i = begin_warm_key; i < end_warm_key; i += all_thread) {
-    tree->insert(to_key(i), i * 2);
-  }
+    if (id == 0) {
+      timer.begin();
+    }
+    std::shuffle(warm_keys.begin(), warm_keys.end(),
+                 std::default_random_engine(my_id));
+    for (size_t i = 0; i < warm_keys.size(); ++i) {
+      tree->insert(warm_keys[i], warm_keys[i] * 2);
+    }
 
-  warmup_cnt.fetch_add(1);
+    warmup_cnt.fetch_add(1);
+  }
 
   if (id == 0) {
     while (warmup_cnt.load() != FLAGS_thread_count)
@@ -224,6 +238,8 @@ int main(int argc, char *argv[]) {
       th[i].join();
     }
   }
+  delete tree;
+
   double all_tp = 0.;
   uint64_t hit = 0;
   uint64_t all = 0;

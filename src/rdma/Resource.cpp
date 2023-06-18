@@ -131,6 +131,7 @@ ibv_mr *createMemoryRegion(uint64_t mm, uint64_t mmSize, RdmaContext *ctx) {
 
   if (!mr) {
     Debug::notifyError("Memory registration failed");
+    exit(-1);
   }
 
   return mr;
@@ -160,7 +161,7 @@ ibv_mr *createMemoryRegionOnChip(uint64_t mm, uint64_t mmSize,
   mr_in.comp_mask = IBV_EXP_REG_MR_DM;
   struct ibv_mr *mr = ibv_exp_reg_mr(&mr_in);
   if (!mr) {
-    Debug::notifyError("Memory registration failed");
+    Debug::notifyError("Memory onchip registration failed");
     return nullptr;
   }
 
