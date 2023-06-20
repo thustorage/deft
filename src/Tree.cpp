@@ -636,8 +636,8 @@ bool Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
                           (uint64_t)mask_buffer, false);
   dsm_client_->ReadSync(page_buffer, page_addr, page_size, ctx);
 
-  auto t = timer.end();
-  stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t);
+  // auto t = timer.end();
+  // stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t);
 
   cas_buffer[0] = __bswap_64(cas_buffer[0]);
   cas_buffer[1] = __bswap_64(cas_buffer[1]);
@@ -700,13 +700,13 @@ bool Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
         assert(false);
       }
 
-      timer.begin();
+      // timer.begin();
       // dsm->read_batch_sync(rs, 2, ctx);
       // dsm->faab_read_sync(rs[0], rs[1], 0, XS_LOCK_FAA_MASK, ctx);
       dsm_client_->ReadDm((char *)cas_buffer, lock_addr, 16, false);
       dsm_client_->ReadSync(page_buffer, page_addr, page_size, ctx);
-      t = timer.end();
-      stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t);
+      // t = timer.end();
+      // stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t);
 
       s0_cnt = (cas_buffer[0] >> 16) & 0xffff;
       s1_cnt = (cas_buffer[0] >> 48) & 0xffff;
@@ -715,6 +715,8 @@ bool Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
       goto retry;
     }
   }
+  auto t = timer.end();
+  stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t);
   return first_lock;
 #else
   // RdmaOpRegion rs[2];
@@ -1556,7 +1558,7 @@ void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
   if (is_update) {
     page->set_consistent();
     write_and_unlock(page_buffer, page_addr, kInternalPageSize, cas_buffer,
-                     lock_addr, 0, ctx, coro_id, false, false);
+                     lock_addr, 0, ctx, coro_id, true, false);
     return;
   }
 
@@ -1616,7 +1618,7 @@ void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
       page->records[3 * kGroupCardinality - 1].ptr.group_gran = new_gran;
       page->records[kInternalCardinality - 1].ptr.group_gran = new_gran;
       write_and_unlock(page_buffer, page_addr, kInternalPageSize, cas_buffer,
-                       lock_addr, 0, ctx, coro_id, false, false);
+                       lock_addr, 0, ctx, coro_id, true, false);
       // update parent ptr
       page_addr.child_gran = new_gran;
       auto up_level = path_stack[coro_id][level + 1];
@@ -1864,7 +1866,7 @@ void Tree::internal_page_store_update_left_child(
   if (is_update) {
     page->set_consistent();
     write_and_unlock(page_buffer, page_addr, kInternalPageSize, cas_buffer,
-                     lock_addr, 0, ctx, coro_id, false, false);
+                     lock_addr, 0, ctx, coro_id, true, false);
     return;
   }
 
@@ -1954,7 +1956,7 @@ void Tree::internal_page_store_update_left_child(
       page->records[3 * kGroupCardinality - 1].ptr.group_gran = new_gran;
       page->records[kInternalCardinality - 1].ptr.group_gran = new_gran;
       write_and_unlock(page_buffer, page_addr, kInternalPageSize, cas_buffer,
-                       lock_addr, 0, ctx, coro_id, false, false);
+                       lock_addr, 0, ctx, coro_id, true, false);
       // update parent ptr
       page_addr.child_gran = new_gran;
       auto up_level = path_stack[coro_id][level + 1];

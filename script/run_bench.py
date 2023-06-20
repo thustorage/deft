@@ -27,16 +27,16 @@ def exec_command(command):
 
 subprocess.run(f'make -j', shell=True)
 
-total_threads_arr = [i for i in range(9, 99, 9)]
+total_threads_arr = [i for i in range(12, 121, 12)]
 print(total_threads_arr)
 
 num_core_per_server = 18
+num_clients = 4
 
 file_name = get_res_name("bench")
 with open(file_name, 'w') as fp:
     for total_threads in total_threads_arr:
         num_servers = 1
-        num_clients = min(3, (total_threads + num_core_per_server - 1) // num_core_per_server)
         num_threads = (total_threads // num_clients)
 
         print(f'start: {total_threads} {num_clients} {num_threads}')
@@ -57,6 +57,11 @@ with open(file_name, 'w') as fp:
         server_subproc.wait()
         client_0_subproc.wait()
         client_other_subproc.wait()
+
+        loading_subproc = subprocess.run(f'grep "Loading Results" ../log/client_0.log', stdout=subprocess.PIPE, shell=True)
+        tmp = loading_subproc.stdout.decode("utf-8")
+        print(tmp.strip())
+        fp.write(tmp)
 
         res_subproc = subprocess.run(f'grep "Final Results" ../log/client_0.log', stdout=subprocess.PIPE, shell=True)
         tmp = res_subproc.stdout.decode("utf-8")

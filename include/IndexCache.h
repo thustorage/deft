@@ -35,9 +35,9 @@ class IndexCache {
   void search_range_from_cache(const Key &from, const Key &to,
                                std::vector<InternalPage *> &result);
 
-  bool add_entry(const Key &from, InternalPage *ptr);
+  bool add_entry(const Key &from, const Key &to, InternalPage *ptr);
   const CacheEntry *find_entry(const Key &k);
-  // const CacheEntry *find_entry(const Key &from, const Key &to);
+  const CacheEntry *find_entry(const Key &from, const Key &to);
 
   bool invalidate(const CacheEntry *entry, int thread_id);
 
@@ -89,12 +89,13 @@ IndexCache::~IndexCache() {
   delete skiplist;
 }
 
-inline bool IndexCache::add_entry(const Key &from, InternalPage *ptr) {
+inline bool IndexCache::add_entry(const Key &from, const Key &to,
+                                  InternalPage *ptr) {
   // TODO memory leak
   auto buf = skiplist->AllocateKey(sizeof(CacheEntry));
   auto &e = *(CacheEntry *)buf;
   e.from = from;
-  // e.to = to - 1; // !IMPORTANT;
+  e.to = to - 1; // !IMPORTANT;
   e.ptr = ptr;
 
   bool res = skiplist->InsertConcurrently(buf);
@@ -104,13 +105,14 @@ inline bool IndexCache::add_entry(const Key &from, InternalPage *ptr) {
   return res;
 }
 
-inline const CacheEntry *IndexCache::find_entry(const Key &from) {
+inline const CacheEntry *IndexCache::find_entry(const Key &from,
+                                                const Key &to) {
   CacheSkipList::Iterator iter(skiplist);
 
   CacheEntry e;
   e.from = from;
-  // e.to = to - 1;
-  iter.SeekForPrev((char *)&e);
+  e.to = to - 1;
+  iter.Seek((char *)&e);
   if (iter.Valid()) {
     auto val = (const CacheEntry *)iter.key();
     return val;
@@ -119,14 +121,17 @@ inline const CacheEntry *IndexCache::find_entry(const Key &from) {
   }
 }
 
+inline const CacheEntry *IndexCache::find_entry(const Key &k) {
+  return find_entry(k, k + 1);
+}
+
 inline bool IndexCache::add_to_cache(InternalPage *page, int thread_id) {
-  auto new_page =
-      (InternalPage *)aligned_alloc(kInternalPageSize, kInternalPageSize);
-  memcpy(reinterpret_cast<void *>(new_page), page, sizeof(InternalPage));
+  auto new_page = (InternalPage *)malloc(kInternalPageSize);
+  memcpy(reinterpret_cast<void *>(new_page), page, kInternalPageSize);
   new_page->hdr.index_cache_freq = 0;
   assert(new_page->hdr.myself != GlobalAddress::Null());
 
-  if (this->add_entry(page->hdr.lowest, new_page)) {
+  if (this->add_entry(page->hdr.lowest, page->hdr.highest, new_page)) {
     skiplist_node_cnt.fetch_add(1);
     auto v = free_page_cnt.fetch_add(-1);
     if (v <= 0) {
@@ -135,8 +140,8 @@ inline bool IndexCache::add_to_cache(InternalPage *page, int thread_id) {
 
     return true;
   } else {  // conflicted
-    auto e = this->find_entry(page->hdr.lowest);
-    if (e && e->from == page->hdr.lowest) {
+    auto e = this->find_entry(page->hdr.lowest, page->hdr.highest);
+    if (e && e->from == page->hdr.lowest && e->to == page->hdr.highest - 1) {
       auto ptr = e->ptr;
 
       if (__sync_bool_compare_and_swap(&(e->ptr), ptr, new_page)) {
@@ -164,8 +169,7 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
                                      int guard_offset, int group_id,
                                      int granularity, Key min, Key max,
                                      int thread_id) {
-  auto new_page =
-      (InternalPage *)aligned_alloc(kInternalPageSize, kInternalPageSize);
+  auto new_page = (InternalPage *)malloc(kInternalPageSize);
   // memset(new_page, 0, kInternalPageSize);
   size_t sz;
   if (granularity == gran_quarter) {
@@ -177,8 +181,8 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
     assert((guard + kInternalCardinality / 2)->ptr.group_gran == granularity);
   }
 
-  auto e = this->find_entry(min);
-  if (e && e->from == min) {  // update sub-node
+  auto e = this->find_entry(min, max);
+  if (e && e->from == min && e->to == max - 1) {  // update sub-node
     auto ptr = e->ptr;
     if (ptr) {
       // update
@@ -230,7 +234,7 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
     new_page->hdr.index_cache_freq = 0;
     new_page->hdr.myself = addr;
     new_page->hdr.leftmost_ptr.group_gran = granularity;
-    if (this->add_entry(min, new_page)) {
+    if (this->add_entry(min, max, new_page)) {
       skiplist_node_cnt.fetch_add(1);
       auto v = free_page_cnt.fetch_add(-1);
       if (v <= 0) {
@@ -304,7 +308,8 @@ inline void IndexCache::search_range_from_cache(
   result.clear();
   CacheEntry e;
   e.from = from;
-  iter.SeekForPrev((char *)&e);
+  e.to = from;
+  iter.Seek((char *)&e);
 
   while (iter.Valid()) {
     auto val = (const CacheEntry *)iter.key();
@@ -344,6 +349,7 @@ retry:
   CacheSkipList::Iterator iter(skiplist);
   CacheEntry tmp;
   tmp.from = k;
+  tmp.to = k;
   iter.Seek((char *)&tmp);
 
   while (iter.Valid()) {

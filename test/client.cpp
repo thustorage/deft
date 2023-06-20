@@ -27,7 +27,7 @@ DEFINE_int32(read_ratio, 100, "read ratio");
 DEFINE_int32(key_space, 200 * 1e6, "key space");
 DEFINE_int32(ops_per_thread, 10 * 1e6, "ops per thread");
 DEFINE_double(warm_ratio, 1, "warm ratio");
-DEFINE_double(zipf, 0., "zipf");
+DEFINE_double(zipf, 0.99, "zipf");
 
 //////////////////// workload parameters /////////////////////
 
@@ -36,6 +36,8 @@ constexpr int MEASURE_SAMPLE = 32;
 std::thread th[MAX_APP_THREAD];
 uint64_t tp[MAX_APP_THREAD][8];
 uint64_t total_time[MAX_APP_THREAD][8];
+double warmup_tp = 0.;
+double warmup_lat = 0.;
 
 Tree *tree;
 DSMClient *dsm_client;
@@ -92,6 +94,7 @@ void thread_run(int id) {
   uint64_t all_thread = FLAGS_thread_count * dsm_client->get_client_size();
 
   Timer timer;
+  Timer total_timer;
   // warmup
   { // to free vector automatically
     uint64_t end_warm_key = FLAGS_warm_ratio * FLAGS_key_space;
@@ -110,15 +113,22 @@ void thread_run(int id) {
       warm_keys.push_back(i + 1);
     }
 
-    if (id == 0) {
-      timer.begin();
-    }
     std::shuffle(warm_keys.begin(), warm_keys.end(),
                  std::default_random_engine(my_id));
+    total_timer.begin();
     for (size_t i = 0; i < warm_keys.size(); ++i) {
+      bool measure_lat = i % MEASURE_SAMPLE == 0;
+      if (measure_lat) {
+        timer.begin();
+      }
       tree->insert(warm_keys[i], warm_keys[i] * 2);
+      if (measure_lat) {
+        auto t = timer.end();
+        stat_helper.add(id, lat_op, t);
+      }
     }
-
+    total_time[id][0] = total_timer.end();
+    total_time[id][1] = warm_keys.size();
     warmup_cnt.fetch_add(1);
   }
 
@@ -128,12 +138,41 @@ void thread_run(int id) {
     printf("node %d finish\n", dsm_client->get_my_client_id());
     // dsm->barrier("warm_finish");
 
-    uint64_t ns = timer.end();
-    printf("warmup time %lds\n", ns / 1000 / 1000 / 1000);
+    printf("warmup time %lds\n", total_time[0][0] / 1000 / 1000 / 1000);
+    warmup_tp = 0.;
+    uint64_t hit = 0;
+    uint64_t all = 0;
+    for (int i = 0; i < FLAGS_thread_count; ++i) {
+      warmup_tp += (double)total_time[i][1] * 1e3 / total_time[i][0];  // Mops
+      hit += cache_hit[i][0];
+      all += (cache_hit[i][0] + cache_miss[i][0]);
+    }
+    uint64_t stat_lat[lat_end];
+    uint64_t stat_cnt[lat_end];
+    for (int k = 0; k < lat_end; k++) {
+      stat_lat[k] = 0;
+      stat_cnt[k] = 0;
+      for (int i = 0; i < MAX_APP_THREAD; ++i) {
+        stat_lat[k] += stat_helper.latency_[i][k];
+        stat_helper.latency_[i][k] = 0;
+        stat_cnt[k] += stat_helper.counter_[i][k];
+        stat_helper.counter_[i][k] = 0;
+      }
+    }
+    warmup_lat = (double)stat_lat[lat_op] / stat_cnt[lat_op];
+    printf("Load Tp %.4lf Mops/s Lat %.1lf\n", warmup_tp, warmup_lat);
+    printf("cache hit rate: %.1lf%%\n", hit * 100.0 / all);
+    printf("avg lock latency: %.1lf\n",
+           (double)stat_lat[lat_lock] / stat_cnt[lat_lock]);
+    printf("avg read page latency: %.1lf\n",
+           (double)stat_lat[lat_read_page] / stat_cnt[lat_read_page]);
+    printf("avg write page latency: %.1lf\n",
+           (double)stat_lat[lat_write_page] / stat_cnt[lat_write_page]);
     fflush(stdout);
 
     tree->index_cache_statistics();
     tree->clear_statistics();
+    memset(reinterpret_cast<void *>(&stat_helper), 0, sizeof(stat_helper));
 
     warmup_cnt.store(0);
   }
@@ -160,7 +199,6 @@ void thread_run(int id) {
   struct zipf_gen_state state;
   mehcached_zipf_init(&state, FLAGS_key_space, FLAGS_zipf, seed);
 
-  Timer total_timer;
   total_timer.begin();
   for (int i = 0; i < FLAGS_ops_per_thread; ++i) {
     uint64_t dis = mehcached_zipf_next(&state);
@@ -240,6 +278,8 @@ int main(int argc, char *argv[]) {
   }
   delete tree;
 
+  uint64_t cluster_warmup_tp = dsm_client->Sum((uint64_t)(warmup_tp * 1000));
+
   double all_tp = 0.;
   uint64_t hit = 0;
   uint64_t all = 0;
@@ -267,15 +307,17 @@ int main(int argc, char *argv[]) {
          all_tp);
 
   if (dsm_client->get_my_client_id() == 0) {
+    printf("Loading Results TP: %.3lf Mops/s Lat: %.3lf us\n",
+           cluster_warmup_tp / 1000.0, warmup_lat / 1000.0);
     printf("cluster throughput %.3f Mops/s\n", cluster_tp / 1000.0);
-    printf("cache hit rate: %.1lf%%\n", hit * 100.0 / all);
-    printf("%d avg op latency: %.1lf\n", dsm_client->get_my_client_id(),
+    printf("avg op latency: %.1lf\n",
            (double)stat_lat[lat_op] / stat_cnt[lat_op]);
-    printf("%d avg lock latency: %.1lf\n", dsm_client->get_my_client_id(),
+    printf("cache hit rate: %.1lf%%\n", hit * 100.0 / all);
+    printf("avg lock latency: %.1lf\n",
            (double)stat_lat[lat_lock] / stat_cnt[lat_lock]);
-    printf("%d avg read page latency: %.1lf\n", dsm_client->get_my_client_id(),
+    printf("avg read page latency: %.1lf\n",
            (double)stat_lat[lat_read_page] / stat_cnt[lat_read_page]);
-    printf("%d avg write page latency: %.1lf\n", dsm_client->get_my_client_id(),
+    printf("avg write page latency: %.1lf\n",
            (double)stat_lat[lat_write_page] / stat_cnt[lat_write_page]);
     // printf("%d avg internal page search latency: %.1lf\n",
     //        dsm_client->get_my_client_id(),
@@ -284,7 +326,7 @@ int main(int argc, char *argv[]) {
     // printf("%d avg cache search latency: %.1lf\n",
     //        dsm_client->get_my_client_id(),
     //        (double)stat_lat[lat_cache_search] / stat_cnt[lat_cache_search]);
-    printf("Final Results: TP: %.3f Mops/s Lat: %.3lf us\n",
+    printf("Final Results: TP: %.3lf Mops/s Lat: %.3lf us\n",
            cluster_tp / 1000.0,
            (double)stat_lat[lat_op] / stat_cnt[lat_op] / 1000.0);
   }
