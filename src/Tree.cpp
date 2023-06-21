@@ -1024,83 +1024,113 @@ next:
 
 uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
                            CoroContext *ctx, int coro_id) {
-  // const int kParaFetch = 32;
-  // thread_local std::vector<InternalPage *> result;
-  // thread_local std::vector<GlobalAddress> leaves;
+  const int kParaFetch = 32;
+  thread_local std::vector<InternalPage *> result;
+  thread_local std::vector<GlobalAddress> leaves;
 
-  // result.clear();
-  // leaves.clear();
-  // index_cache->search_range_from_cache(from, to, result);
+  result.clear();
+  leaves.clear();
 
-  // // FIXME: here, we assume all innernal nodes are cached in compute node
-  // if (result.empty()) {
-  //   return 0;
-  // }
+  index_cache->thread_status->rcu_progress(dsm_client_->get_my_thread_id());
 
-  // uint64_t counter = 0;
-  // for (auto page : result) {
-  //   auto cnt = page->hdr.cnt;
-  //   auto addr = page->hdr.leftmost_ptr;
+  index_cache->search_range_from_cache(from, to, result);
 
-  //   // [from, to]
-  //   // [lowest, page->records[0].key);
-  //   bool no_fetch = from > page->records[0].key || to < page->hdr.lowest;
-  //   if (!no_fetch) {
-  //     leaves.push_back(addr);
-  //   }
-  //   for (int i = 1; i < cnt; ++i) {
-  //     no_fetch = from > page->records[i].key || to < page->records[i - 1].key;
-  //     if (!no_fetch) {
-  //       leaves.push_back(page->records[i - 1].ptr);
-  //     }
-  //   }
+  // FIXME: here, we assume all innernal nodes are cached in compute node
+  if (result.empty()) {
+    index_cache->thread_status->rcu_exit(dsm_client_->get_my_thread_id());
+    return 0;
+  }
 
-  //   no_fetch = from > page->hdr.highest || to < page->records[cnt - 1].key;
-  //   if (!no_fetch) {
-  //     leaves.push_back(page->records[cnt - 1].ptr);
-  //   }
-  // }
+  uint64_t counter = 0;
+  for (auto page : result) {
+    // auto cnt = page->hdr.cnt;
+    int prev_idx = -1;
+    int idx = 0;
+    while (idx < kInternalCardinality) {
+      if (page->records[idx].key == 0 ||
+          page->records[idx].ptr == GlobalAddress::Null()) {
+        ++idx;
+        continue;
+      }
+      InternalEntry *prev =
+          reinterpret_cast<InternalEntry *>(page->records + prev_idx);
+      if (prev->key <= to && page->records[idx].key >= from) {
+        leaves.push_back(prev->ptr);
+      }
+      prev_idx = idx;
+      if (page->records[idx].key >= to) {
+        break;
+      }
+      ++idx;
+    }
+  }
 
-  // int cq_cnt = 0;
-  // char *range_buffer = (dsm_client_->get_rbuf(coro_id)).get_range_buffer();
-  // for (size_t i = 0; i < leaves.size(); ++i) {
-  //   if (i > 0 && i % kParaFetch == 0) {
-  //     dsm_client_->PollRdmaCq(kParaFetch);
-  //     cq_cnt -= kParaFetch;
-  //     for (int k = 0; k < kParaFetch; ++k) {
-  //       auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
-  //       for (int i = 0; i < kLeafCardinality; ++i) {
-  //         auto &r = page->records[i];
-  //         if (r.value != kValueNull) {
-  //           if (r.key >= from && r.key <= to) {
-  //             value_buffer[counter++] = r.value;
-  //           }
-  //         }
-  //       }
-  //     }
-  //   }
-  //   dsm_client_->Read(range_buffer + kLeafPageSize * (i % kParaFetch),
-  //                     leaves[i], kLeafPageSize, true);
-  //   cq_cnt++;
-  // }
+  int cq_cnt = 0;
+  char *range_buffer = (dsm_client_->get_rbuf(coro_id)).get_range_buffer();
+  for (size_t i = 0; i < leaves.size(); ++i) {
+    if (i > 0 && i % kParaFetch == 0) {
+      dsm_client_->PollRdmaCq(kParaFetch);
+      cq_cnt -= kParaFetch;
+      for (int k = 0; k < kParaFetch; ++k) {
+        auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
+        for (int idx = 0; idx < kNumGroup; ++idx) {
+          LeafEntryGroup *g = &page->groups[idx];
+          for (int j = 0; j < kAssociativity; ++j) {
+            auto &r = g->front[j];
+            if (r.value != kValueNull && r.key >= from && r.key < to) {
+              value_buffer[counter++] = r.value;
+            }
+          }
+          for (int j = 0; j < kAssociativity; ++j) {
+            auto &r = g->back[j];
+            if (r.value != kValueNull && r.key >= from && r.key < to) {
+              value_buffer[counter++] = r.value;
+            }
+          }
+          for (int j = 0; j < kAssociativity - 1; ++j) {
+            auto &r = g->overflow[j];
+            if (r.value != kValueNull && r.key >= from && r.key < to) {
+              value_buffer[counter++] = r.value;
+            }
+          }
+        }
+      }
+    }
+    dsm_client_->Read(range_buffer + kLeafPageSize * (i % kParaFetch),
+                      leaves[i], kLeafPageSize, true);
+    cq_cnt++;
+  }
 
-  // if (cq_cnt != 0) {
-  //   dsm_client_->PollRdmaCq(cq_cnt);
-  //   for (int k = 0; k < cq_cnt; ++k) {
-  //     auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
-  //     for (int i = 0; i < kLeafCardinality; ++i) {
-  //       auto &r = page->records[i];
-  //       if (r.value != kValueNull) {
-  //         if (r.key >= from && r.key <= to) {
-  //           value_buffer[counter++] = r.value;
-  //         }
-  //       }
-  //     }
-  //   }
-  // }
+  if (cq_cnt != 0) {
+    dsm_client_->PollRdmaCq(cq_cnt);
+    for (int k = 0; k < cq_cnt; ++k) {
+      auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
+      for (int idx = 0; idx < kNumGroup; ++idx) {
+        LeafEntryGroup *g = &page->groups[idx];
+        for (int j = 0; j < kAssociativity; ++j) {
+          auto &r = g->front[j];
+          if (r.value != kValueNull && r.key >= from && r.key < to) {
+            value_buffer[counter++] = r.value;
+          }
+        }
+        for (int j = 0; j < kAssociativity; ++j) {
+          auto &r = g->back[j];
+          if (r.value != kValueNull && r.key >= from && r.key < to) {
+            value_buffer[counter++] = r.value;
+          }
+        }
+        for (int j = 0; j < kAssociativity - 1; ++j) {
+          auto &r = g->overflow[j];
+          if (r.value != kValueNull && r.key >= from && r.key < to) {
+            value_buffer[counter++] = r.value;
+          }
+        }
+      }
+    }
+  }
 
-  Debug::notifyError("range query not implemented");
-  return 0;
+  index_cache->thread_status->rcu_exit(dsm_client_->get_my_thread_id());
+  return counter;
 }
 
 void Tree::del(const Key &k, CoroContext *ctx, int coro_id) {

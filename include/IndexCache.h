@@ -10,6 +10,7 @@
 #include "Timer.h"
 #include "WRLock.h"
 #include "third_party/inlineskiplist.h"
+#include "thread_epoch.h"
 
 extern bool enter_debug;
 
@@ -48,6 +49,8 @@ class IndexCache {
   void bench();
 
   void free_delay();
+  
+  ThreadStatus *thread_status;
 
  private:
   uint64_t cache_size;  // MB;
@@ -75,6 +78,8 @@ inline IndexCache::IndexCache(int cache_size) : cache_size(cache_size) {
   skiplist = new CacheSkipList(cmp, &alloc, 21);
   uint64_t memory_size = define::MB * cache_size;
 
+  thread_status = new ThreadStatus(MAX_APP_THREAD);
+
   all_page_cnt = memory_size / kInternalPageSize;
   free_page_cnt.store(all_page_cnt);
   skiplist_node_cnt.store(0);
@@ -87,6 +92,7 @@ IndexCache::~IndexCache() {
     free_delay_thread_.join();
   }
   delete skiplist;
+  delete thread_status;
 }
 
 inline bool IndexCache::add_entry(const Key &from, const Key &to,
@@ -317,7 +323,11 @@ inline void IndexCache::search_range_from_cache(
       if (val->from > to) {
         return;
       }
-      result.push_back(val->ptr);
+      if (result.size() == 0 ||
+          (result.back()->hdr.lowest < val->ptr->hdr.lowest &&
+           result.back()->hdr.highest > val->ptr->hdr.highest)) {
+        result.push_back(val->ptr);
+      }
     }
     iter.Next();
   }
@@ -406,6 +416,7 @@ void IndexCache::free_delay() {
       local_list.splice(local_list.end(), delay_free_lists[i].list);
       delay_free_lists[i].lock.wUnlock();
     }
+    thread_status->rcu_barrier();
     auto it = local_list.begin();
     for (; it != local_list.end(); ++it) {
       if (asm_rdtsc() - it->second > 5000ul * 10) {

@@ -19,11 +19,12 @@
 const int kCoroCnt = 3;
 
 // #define BENCH_LOCK
+// #define YCSB_D
 
 DEFINE_int32(server_count, 1, "server count");
 DEFINE_int32(client_count, 1, "client count");
 DEFINE_int32(thread_count, 1, "thread count");
-DEFINE_int32(read_ratio, 100, "read ratio");
+DEFINE_int32(read_ratio, 50, "read ratio");
 DEFINE_int32(key_space, 200 * 1e6, "key space");
 DEFINE_int32(ops_per_thread, 10 * 1e6, "ops per thread");
 DEFINE_double(warm_ratio, 1, "warm ratio");
@@ -81,6 +82,42 @@ RequstGen *coro_func(int coro_id, DSMClient *dsm_client, int id) {
   return new RequsetGenBench(coro_id, dsm_client, id);
 }
 
+#ifdef YCSB_D
+void ycsb_d(int id) {
+  uint32_t seed = (dsm_client->get_my_client_id() << 10) + id;
+  uint64_t window = FLAGS_key_space * 0.01;
+  uint64_t all_thread = FLAGS_thread_count * dsm_client->get_client_size();
+  uint64_t my_id = FLAGS_thread_count * dsm_client->get_my_client_id() + id;
+  uint64_t cur_key = FLAGS_key_space * FLAGS_warm_ratio + window + my_id;
+
+  Timer timer, total_timer;
+  total_timer.begin();
+  for (int i = 0; i < FLAGS_ops_per_thread; ++i) {
+    Value v;
+    bool measure_lat = i % MEASURE_SAMPLE == 0;
+    if (measure_lat) {
+      timer.begin();
+    }
+    if (rand_r(&seed) % 100 < FLAGS_read_ratio) {
+      uint64_t k =
+          (cur_key + FLAGS_key_space - all_thread - rand_r(&seed) % window) %
+          FLAGS_key_space;
+      tree->search(to_key(k), v);
+    } else {
+      v = 12;
+      tree->insert(to_key(cur_key), v);
+      cur_key = (cur_key + all_thread) % FLAGS_key_space;
+    }
+    if (measure_lat) {
+      auto t = timer.end();
+      stat_helper.add(id, lat_op, t);
+    }
+  }
+  total_time[id][0] = total_timer.end();
+}
+#endif
+
+
 std::atomic<int64_t> warmup_cnt{0};
 void thread_run(int id) {
 
@@ -127,6 +164,13 @@ void thread_run(int id) {
         stat_helper.add(id, lat_op, t);
       }
     }
+#ifdef YCSB_D
+    uint64_t window = FLAGS_key_space * 0.01;
+    for (uint64_t i = end_warm_key + my_id; i < end_warm_key + window;
+         i += all_thread) {
+      tree->insert(to_key(i), i * 2);
+    }
+#endif
     total_time[id][0] = total_timer.end();
     total_time[id][1] = warm_keys.size();
     warmup_cnt.fetch_add(1);
@@ -193,6 +237,12 @@ void thread_run(int id) {
 
 #else
 
+#ifdef YCSB_D
+  // ycsb-d
+  ycsb_d(id);
+  return;
+#endif
+
   /// without coro
   // uint32_t seed = rdtsc();
   uint32_t seed = (dsm_client->get_my_client_id() << 10) + id;
@@ -213,8 +263,10 @@ void thread_run(int id) {
     tree->lock_bench(key);
 #else
     Value v;
+    // Value buffer[101];
     if (rand_r(&seed) % 100 < FLAGS_read_ratio) {  // GET
       tree->search(key, v);
+      // tree->range_query(key, key + 100, buffer);
     } else {
       v = 12;
       tree->insert(key, v);
