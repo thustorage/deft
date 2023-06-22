@@ -41,6 +41,7 @@ class IndexCache {
   const CacheEntry *find_entry(const Key &from, const Key &to);
 
   bool invalidate(const CacheEntry *entry, int thread_id);
+  bool invalidate(const Key &from, const Key &to, int thread_id);
 
   const CacheEntry *get_a_random_entry(uint64_t &freq);
 
@@ -80,7 +81,7 @@ inline IndexCache::IndexCache(int cache_size) : cache_size(cache_size) {
 
   thread_status = new ThreadStatus(MAX_APP_THREAD);
 
-  all_page_cnt = memory_size / kInternalPageSize;
+  all_page_cnt = memory_size / kInternalPageSize * kMaxInternalGroup;
   free_page_cnt.store(all_page_cnt);
   skiplist_node_cnt.store(0);
   free_delay_thread_ = std::thread(&IndexCache::free_delay, this);
@@ -105,8 +106,11 @@ inline bool IndexCache::add_entry(const Key &from, const Key &to,
   e.ptr = ptr;
 
   bool res = skiplist->InsertConcurrently(buf);
-  if (res && from > max_key.load(std::memory_order_acquire)) {
-    max_key.store(from, std::memory_order_release);
+  if (res) {
+    skiplist_node_cnt.fetch_add(1);
+    if (from > max_key.load(std::memory_order_acquire)) {
+      max_key.store(from, std::memory_order_release);
+    }
   }
   return res;
 }
@@ -135,11 +139,13 @@ inline bool IndexCache::add_to_cache(InternalPage *page, int thread_id) {
   auto new_page = (InternalPage *)malloc(kInternalPageSize);
   memcpy(reinterpret_cast<void *>(new_page), page, kInternalPageSize);
   new_page->hdr.index_cache_freq = 0;
+  for (int i = 0 ; i < kMaxInternalGroup; ++i) {
+    new_page->hdr.grp_in_cache[i] = true;
+  }
   assert(new_page->hdr.myself != GlobalAddress::Null());
 
   if (this->add_entry(page->hdr.lowest, page->hdr.highest, new_page)) {
-    skiplist_node_cnt.fetch_add(1);
-    auto v = free_page_cnt.fetch_add(-1);
+    auto v = free_page_cnt.fetch_sub(kMaxInternalGroup);
     if (v <= 0) {
       evict_one(thread_id);
     }
@@ -152,11 +158,21 @@ inline bool IndexCache::add_to_cache(InternalPage *page, int thread_id) {
 
       if (__sync_bool_compare_and_swap(&(e->ptr), ptr, new_page)) {
         if (ptr == nullptr) {
-          auto v = free_page_cnt.fetch_add(-1);
+          auto v = free_page_cnt.fetch_sub(kMaxInternalGroup);
           if (v <= 0) {
             evict_one(thread_id);
           }
         } else {
+          int old_cnt = 0;
+          for (int i = 0; i < kMaxInternalGroup; ++i) {
+            old_cnt += ptr->hdr.grp_in_cache[i];
+          }
+          if (old_cnt < kMaxInternalGroup) {
+            auto v = free_page_cnt.fetch_sub(kMaxInternalGroup - old_cnt);
+            if (v <= 0) {
+              evict_one(thread_id);
+            }
+          }
           delay_free_lists[thread_id].lock.wLock();
           delay_free_lists[thread_id].list.push_back(
               std::make_pair(ptr, asm_rdtsc()));
@@ -194,13 +210,13 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
       // update
       memcpy(reinterpret_cast<char *>(new_page), ptr, kInternalPageSize);
       memcpy(reinterpret_cast<char *>(new_page) + guard_offset, guard, sz);
-      if (ptr->hdr.leftmost_ptr.group_gran != granularity) {
-        InternalEntry *origin_guard = reinterpret_cast<InternalEntry *>(
-            reinterpret_cast<char *>(ptr) + guard_offset);
-        InternalEntry *new_guard = reinterpret_cast<InternalEntry *>(
-            reinterpret_cast<char *>(new_page) + guard_offset);
-        new_guard->ptr.group_gran = origin_guard->ptr.group_gran;
-      }
+      InternalEntry *origin_guard = reinterpret_cast<InternalEntry *>(
+          reinterpret_cast<char *>(ptr) + guard_offset);
+      InternalEntry *new_guard = reinterpret_cast<InternalEntry *>(
+          reinterpret_cast<char *>(new_page) + guard_offset);
+      new_guard->ptr.group_gran = origin_guard->ptr.group_gran;
+      new_page->hdr.leftmost_ptr.group_gran =
+          std::min(ptr->hdr.leftmost_ptr.group_gran, (uint64_t)granularity);
     } else {
       // add
       memset(reinterpret_cast<char *>(new_page), 0, kInternalPageSize);
@@ -213,13 +229,39 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
       new_page->hdr.myself = addr;
       new_page->hdr.leftmost_ptr.group_gran = granularity;
     }
+    int cnt = 0;
+    if (granularity == gran_quarter) {
+      new_page->hdr.grp_in_cache[group_id] = true;
+      cnt = 1;
+    } else {
+      cnt = 2;
+      if (group_id < 2) {
+        new_page->hdr.grp_in_cache[0] = true;
+        new_page->hdr.grp_in_cache[1] = true;
+      } else {
+        new_page->hdr.grp_in_cache[2] = true;
+        new_page->hdr.grp_in_cache[3] = true;
+      }
+    }
     if (__sync_bool_compare_and_swap(&(e->ptr), ptr, new_page)) {
       if (ptr == nullptr) {
-        auto v = free_page_cnt.fetch_add(-1);
+        auto v = free_page_cnt.fetch_sub(cnt);
         if (v <= 0) {
           evict_one(thread_id);
         }
       } else {
+        int old_cnt = 0;
+        int new_cnt = 0;
+        for (int i = 0; i < kMaxInternalGroup; ++i) {
+          old_cnt += ptr->hdr.grp_in_cache[i];
+          new_cnt += new_page->hdr.grp_in_cache[i];
+        }
+        if (old_cnt != new_cnt) {
+          auto v = free_page_cnt.fetch_sub(new_cnt - old_cnt);
+          if (v <= 0) {
+            evict_one(thread_id);
+          }
+        }
         delay_free_lists[thread_id].lock.wLock();
         delay_free_lists[thread_id].list.push_back(
             std::make_pair(ptr, asm_rdtsc()));
@@ -227,8 +269,6 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
       }
       return true;
     }
-    free(new_page);
-    return false;
   } else {
     // add
     memset(reinterpret_cast<char *>(new_page), 0, kInternalPageSize);
@@ -240,17 +280,30 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
     new_page->hdr.index_cache_freq = 0;
     new_page->hdr.myself = addr;
     new_page->hdr.leftmost_ptr.group_gran = granularity;
+    int cnt = 0;
+    if (granularity == gran_quarter) {
+      cnt = 1;
+      new_page->hdr.grp_in_cache[group_id] = true;
+    } else {
+      cnt = 2;
+      if (group_id < 2) {
+        new_page->hdr.grp_in_cache[0] = true;
+        new_page->hdr.grp_in_cache[1] = true;
+      } else {
+        new_page->hdr.grp_in_cache[2] = true;
+        new_page->hdr.grp_in_cache[3] = true;
+      }
+    }
     if (this->add_entry(min, max, new_page)) {
-      skiplist_node_cnt.fetch_add(1);
-      auto v = free_page_cnt.fetch_add(-1);
+      auto v = free_page_cnt.fetch_sub(cnt);
       if (v <= 0) {
         evict_one(thread_id);
       }
       return true;
     }
-    free(new_page);
-    return false;
   }
+  free(new_page);
+  return false;
 }
 
 inline const CacheEntry *IndexCache::search_from_cache(
@@ -260,12 +313,13 @@ inline const CacheEntry *IndexCache::search_from_cache(
   InternalPage *page = entry ? entry->ptr : nullptr;
 
   if (page && k >= page->hdr.lowest && k < page->hdr.highest) {
-    page->hdr.index_cache_freq++;
+    if (page->hdr.index_cache_freq < UINT64_MAX) {
+      page->hdr.index_cache_freq++;
+    }
 
     int group_id = get_key_group(k, page->hdr.lowest, page->hdr.highest);
-    uint8_t cur_group_gran = std::max(
-        page->hdr.leftmost_ptr.group_gran,
-        page->records[kGroupCardinality * (group_id + 1) - 1].ptr.group_gran);
+    uint8_t cur_group_gran =
+        page->records[kGroupCardinality * (group_id + 1) - 1].ptr.group_gran;
     int end, group_cnt;
     if (cur_group_gran == gran_quarter) {
       end = kGroupCardinality * (group_id + 1);
@@ -341,14 +395,27 @@ inline bool IndexCache::invalidate(const CacheEntry *entry, int thread_id) {
   }
 
   if (__sync_bool_compare_and_swap(&(entry->ptr), ptr, 0)) {
+    int cnt = 0;
+    for (int i = 0; i < kMaxInternalGroup; ++i) {
+      cnt += ptr->hdr.grp_in_cache[i];
+    }
     delay_free_lists[thread_id].lock.wLock();
     delay_free_lists[thread_id].list.push_back(
         std::make_pair(ptr, asm_rdtsc()));
     delay_free_lists[thread_id].lock.wUnlock();
-    free_page_cnt.fetch_add(1);
+    free_page_cnt.fetch_add(cnt);
     return true;
   }
 
+  return false;
+}
+
+inline bool IndexCache::invalidate(const Key &from, const Key &to,
+                                   int thread_id) {
+  auto e = find_entry(from, to);
+  if (e && e->from == from && e->to == to - 1) {
+    return invalidate(e, thread_id);
+  }
   return false;
 }
 

@@ -262,7 +262,7 @@ bool rdmaFetchAndAddBoundary(ibv_qp *qp, int log_sz, uint64_t source,
   struct ibv_exp_send_wr wr;
   struct ibv_exp_send_wr *wrBad;
 
-  fillSgeWr(sg, wr, source, 8, lkey);
+  fillSgeWr(sg, wr, source, 1 << log_sz, lkey);
 
   wr.exp_opcode = IBV_EXP_WR_EXT_MASKED_ATOMIC_FETCH_AND_ADD;
   wr.exp_send_flags = IBV_EXP_SEND_EXT_ATOMIC_INLINE;
@@ -487,11 +487,11 @@ bool rdmaFaaBoundRead(ibv_qp *qp, const RdmaOpRegion &faab_ror,
   struct ibv_exp_send_wr wr[2];
   struct ibv_exp_send_wr *wrBad;
 
-  fillSgeWr(sg[0], wr[0], faab_ror.source, 8, faab_ror.lkey);
+  fillSgeWr(sg[0], wr[0], faab_ror.source, 1 << faab_ror.size, faab_ror.lkey);
   wr[0].exp_opcode = IBV_EXP_WR_EXT_MASKED_ATOMIC_FETCH_AND_ADD;
   wr[0].exp_send_flags = IBV_EXP_SEND_EXT_ATOMIC_INLINE;
   // wr[0].wr_id = wr_id;
-  wr[0].ext_op.masked_atomics.log_arg_sz = 3;
+  wr[0].ext_op.masked_atomics.log_arg_sz = faab_ror.size;
   wr[0].ext_op.masked_atomics.remote_addr = faab_ror.dest;
   wr[0].ext_op.masked_atomics.rkey = faab_ror.remoteRKey;
   auto &op = wr[0].ext_op.masked_atomics.wr_data.inline_data.op.fetch_add;

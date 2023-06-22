@@ -76,14 +76,17 @@ struct SearchResult {
   }
 };
 
+constexpr int kMaxInternalGroup = 4;
+
 struct alignas(64) Header {
 // uint16_t level;
-  uint8_t padding[20];
+  uint8_t padding[10];
   uint8_t node_version;
   // int8_t cnt = 0;
   uint8_t level : 7;
   uint8_t is_root : 1;
-  uint16_t index_cache_freq;
+  uint8_t grp_in_cache[kMaxInternalGroup];  // used in cache
+  uint64_t index_cache_freq;
   GlobalAddress myself = GlobalAddress::Null(); // used in cache
 
   Key highest = kKeyMax;
@@ -118,7 +121,7 @@ struct __attribute__((packed)) LeafEntry {
 
 constexpr int kInternalCardinality =
     (kInternalPageSize - sizeof(Header)) / sizeof(InternalEntry);
-constexpr int kGroupCardinality = kInternalCardinality / 4;
+constexpr int kGroupCardinality = kInternalCardinality / kMaxInternalGroup;
 
 static inline double get_quarter(Key min, Key max) { return (max - min) / 4.0; }
 
