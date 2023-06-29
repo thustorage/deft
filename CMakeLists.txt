@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.0 FATAL_ERROR)
-project(Sherman)
+project(Deft)
 
 # disable boost warning
 add_definitions(-DBOOST_COROUTINES_NO_DEPRECATION_WARNING)
@@ -19,8 +19,8 @@ set(COMMON_SRC ${PROJECT_SOURCE_DIR}/src)
 
 #Used by both server and clients
 file(GLOB_RECURSE COMMON_FILE ${COMMON_SRC}/*.cpp)
-add_library(sherman STATIC ${COMMON_FILE})
-link_libraries(sherman)
+add_library(deft STATIC ${COMMON_FILE})
+link_libraries(deft)
 
 file(GLOB TEST_SRC ${PROJECT_SOURCE_DIR}/test/*.cpp)
 foreach (TEST ${TEST_SRC})

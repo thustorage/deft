@@ -30,6 +30,7 @@ public:
     } else {
       need_chunck = false;
       cur.offset += size;
+      cur.offset = (cur.offset + 1023) & (~1023ul);
     }
 
     // assert(res.addr + size <= 40 * define::GB);

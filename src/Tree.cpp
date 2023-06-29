@@ -26,11 +26,14 @@ StatHelper stat_helper;
 
 thread_local CoroCall Tree::worker[define::kMaxCoro];
 thread_local CoroCall Tree::master;
+thread_local uint64_t Tree::coro_ops_total;
+thread_local uint64_t Tree::coro_ops_cnt_start;
+thread_local uint64_t Tree::coro_ops_cnt_finish;
 thread_local GlobalAddress path_stack[define::kMaxCoro]
                                      [define::kMaxLevelOfTree];
 
 constexpr uint64_t NUM_SHARED_LOCK_GROUP = 3;
-constexpr uint64_t XS_LOCK_FAA_MASK = 0x8000800080008000;
+constexpr uint64_t XS_LOCK_FAA_MASK = 0x8000800080008000ul;
 // 3 S 1 X: SS SS SS XX
 
 constexpr uint64_t ADD_S_LOCK[3] = {1ul, 1ul << 32, 1ul};
@@ -39,7 +42,7 @@ constexpr uint64_t ADD_S_UNLOCK[3] = {1ul << 16, 1ul << 48, 1ul << 16};
 constexpr uint64_t ADD_X_LOCK = 1ul << 32;
 constexpr uint64_t ADD_X_UNLOCK = 1ul << 48;
 
-thread_local std::queue<uint16_t> hot_wait_queue;
+// thread_local std::queue<uint16_t> hot_wait_queue;
 
 Tree::Tree(DSMClient *dsm_client, uint16_t tree_id)
     : dsm_client_(dsm_client), tree_id(tree_id) {
@@ -356,7 +359,7 @@ inline bool Tree::acquire_x_lock(GlobalAddress lock_addr, int group_id,
       // get
     } else {
       retry_cnt++;
-      if (retry_cnt > 1000000) {
+      if (retry_cnt > 5000000) {
         printf("Deadlock [%u, %lu]\n", lock_addr.nodeID, lock_addr.offset);
         printf("s0 [%u, %u] s1 [%u, %u] s2 [%u, %u] x [%u, %u]\n", s0_cnt,
                s0_max, s1_cnt, s1_max, s2_cnt, s2_max, x_cnt, x_max);
@@ -451,8 +454,11 @@ retry:
     // get
   } else {
     retry_cnt++;
-    if (retry_cnt > 1000000) {
-      std::cout << "Deadlock " << lock_addr << std::endl;
+    if (retry_cnt > 5000000) {
+      printf("Deadlock [%u, %lu] my thread %d coro_id %d\n", lock_addr.nodeID,
+             lock_addr.offset, dsm_client_->get_my_thread_id(), coro_id);
+      printf("x [%u, %u]\n", x_cnt, x_max);
+      fflush(stdout);
       assert(false);
       exit(-1);
     }
@@ -700,10 +706,12 @@ bool Tree::batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
       // rs[1].is_on_chip = false;
 
       retry_cnt++;
-      if (retry_cnt > 1000000) {
-        printf("Deadlock [%u, %lu]\n", lock_addr.nodeID, lock_addr.offset);
+      if (retry_cnt > 5000000) {
+        printf("Deadlock [%u, %lu] my thread %d coro_id %d\n", lock_addr.nodeID,
+               lock_addr.offset, dsm_client_->get_my_thread_id(), coro_id);
         printf("s0 [%u, %u] s1 [%u, %u] s2 [%u, %u] x [%u, %u]\n", s0_cnt,
                s0_max, s1_cnt, s1_max, s2_cnt, s2_max, x_cnt, x_max);
+        fflush(stdout);
         assert(false);
         exit(-1);
       }
@@ -1295,7 +1303,8 @@ re_read:
   int group_id = -1;
   uint8_t actual_gran = read_gran;
   if (read_gran == gran_full) {
-    dsm_client_->ReadSync(page_buffer, page_addr, kInternalPageSize, ctx);
+    dsm_client_->ReadSync(page_buffer, page_addr,
+                          std::max(kInternalPageSize, kLeafPageSize), ctx);
     size_t start_offset =
         offsetof(InternalPage, records) - sizeof(InternalEntry);
     guard = reinterpret_cast<InternalEntry *>(page_buffer + start_offset);
@@ -1428,6 +1437,8 @@ re_read:
       }
     }
     internal_page_slice_search(guard, search_cnt, k, result);
+    assert(result.sibling != GlobalAddress::Null() ||
+           result.next_level != GlobalAddress::Null());
     // auto t = timer.end();
     // stat_helper.add(dsm_client_->get_my_thread_id(), lat_internal_search, t);
   }
@@ -1684,7 +1695,8 @@ void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
       // split
       std::vector<InternalEntry> tmp_records(
           page->records, page->records + kInternalCardinality);
-      tmp_records.insert(tmp_records.begin() + insert_index + 1, {k, v});
+      tmp_records.insert(tmp_records.begin() + insert_index + 1,
+                         {.key = k, .ptr = v});
       int m = kInternalCardinality / 2;
       Key split_key = tmp_records[m].key;
       GlobalAddress split_val = tmp_records[m].ptr;
@@ -2025,7 +2037,9 @@ void Tree::internal_page_store_update_left_child(
       // split
       std::vector<InternalEntry> tmp_records(
           page->records, page->records + kInternalCardinality);
-      tmp_records.insert(tmp_records.begin() + insert_index + 1, {k, v});
+      InternalEntry new_entry;
+      tmp_records.insert(tmp_records.begin() + insert_index + 1,
+                         {.key = k, .ptr = v});
       int m = kInternalCardinality / 2;
       Key split_key = tmp_records[m].key;
       GlobalAddress split_val = tmp_records[m].ptr;
@@ -2545,8 +2559,12 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
   return true;
 }
 
-void Tree::run_coroutine(CoroFunc func, int id, int coro_cnt, bool lock_bench) {
+void Tree::run_coroutine(CoroFunc func, int id, int coro_cnt, bool lock_bench,
+                         uint64_t total_ops) {
   using namespace std::placeholders;
+  coro_ops_total = total_ops;
+  coro_ops_cnt_start = 0;
+  coro_ops_cnt_finish = 0;
 
   assert(coro_cnt <= define::kMaxCoro);
   for (int i = 0; i < coro_cnt; ++i) {
@@ -2568,12 +2586,14 @@ void Tree::coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
   ctx.yield = &yield;
 
   Timer coro_timer;
-  auto thread_id = dsm_client_->get_my_thread_id();
+  // auto thread_id = dsm_client_->get_my_thread_id();
 
-  while (true) {
+  // while (true) {
+  while (coro_ops_cnt_start < coro_ops_total) {
     auto r = gen->next();
 
-    coro_timer.begin();
+    // coro_timer.begin();
+    ++coro_ops_cnt_start;
     if (lock_bench) {
       this->lock_bench(r.k, &ctx, coro_id);
     } else {
@@ -2584,14 +2604,20 @@ void Tree::coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
         this->insert(r.k, r.v, &ctx, coro_id);
       }
     }
-    auto t = coro_timer.end();
-    auto us_10 = t / 100;
-    if (us_10 >= LATENCY_WINDOWS) {
-      us_10 = LATENCY_WINDOWS - 1;
-    }
-    latency[thread_id][us_10]++;
-    stat_helper.add(thread_id, lat_op, t);
+    // auto t = coro_timer.end();
+    // auto us_10 = t / 100;
+    // if (us_10 >= LATENCY_WINDOWS) {
+    //   us_10 = LATENCY_WINDOWS - 1;
+    // }
+    // latency[thread_id][us_10]++;
+    // stat_helper.add(thread_id, lat_op, t);
+    ++coro_ops_cnt_finish;
   }
+  // printf("thread %d coro_id %d start %lu finish %lu\n",
+  //        dsm_client_->get_my_thread_id(), coro_id, coro_ops_cnt_start,
+  //        coro_ops_cnt_finish);
+  // fflush(stdout);
+  yield(master);
 }
 
 void Tree::coro_master(CoroYield &yield, int coro_cnt) {
@@ -2599,19 +2625,24 @@ void Tree::coro_master(CoroYield &yield, int coro_cnt) {
     yield(worker[i]);
   }
 
-  while (true) {
+  // while (true) {
+  while (coro_ops_cnt_finish < coro_ops_total) {
     uint64_t next_coro_id;
 
     if (dsm_client_->PollRdmaCqOnce(next_coro_id)) {
       yield(worker[next_coro_id]);
     }
 
-    if (!hot_wait_queue.empty()) {
-      next_coro_id = hot_wait_queue.front();
-      hot_wait_queue.pop();
-      yield(worker[next_coro_id]);
-    }
+    // if (!hot_wait_queue.empty()) {
+    //   next_coro_id = hot_wait_queue.front();
+    //   hot_wait_queue.pop();
+    //   yield(worker[next_coro_id]);
+    // }
   }
+  // printf("thread %d master start %lu finish %lu\n",
+  //        dsm_client_->get_my_thread_id(), coro_ops_cnt_start,
+  //        coro_ops_cnt_finish);
+  // fflush(stdout);
 }
 
 // // Local Locks

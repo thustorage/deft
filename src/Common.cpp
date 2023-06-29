@@ -9,7 +9,7 @@
 #include <arpa/inet.h>
 
 void bindCore(uint16_t core) {
-  constexpr int CORE_PER_NUMA = 16;
+  constexpr int CORE_PER_NUMA = 18;
   if (core >= CORE_PER_NUMA) {
     core += CORE_PER_NUMA;
   }

@@ -77,7 +77,7 @@ constexpr uint64_t GB = 1024ull * MB;
 constexpr uint16_t kCacheLineSize = 64;
 
 // for remote allocate
-constexpr uint64_t kChunkSize = 32 * MB;
+constexpr uint64_t kChunkSize = 16 * MB;
 
 // for store root pointer
 constexpr uint64_t kRootPointerStoreOffest = kChunkSize / 2;
@@ -101,7 +101,7 @@ constexpr int64_t kPerCoroRdmaBuf = 128 * 1024;
 
 constexpr uint8_t kMaxHandOverTime = 0;
 
-constexpr int kIndexCacheSize = 500; // MB
+constexpr int kIndexCacheSize = 550; // MB
 } // namespace define
 
 static inline unsigned long long asm_rdtsc(void) {
@@ -109,6 +109,8 @@ static inline unsigned long long asm_rdtsc(void) {
   __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
   return ((unsigned long long)lo) | (((unsigned long long)hi) << 32);
 }
+
+// constexpr uint8_t kKeySize = 64;
 
 // For Tree
 using Key = uint64_t;

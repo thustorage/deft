@@ -3,3 +3,4 @@ build/*
 .vscode/
 log/
 result/
+script/global_config.sh

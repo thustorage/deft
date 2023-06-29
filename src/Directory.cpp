@@ -25,7 +25,7 @@ Directory::~Directory() { delete chunckAlloc; }
 
 void Directory::dirThread() {
 
-  // bindCore(31 - dirID);
+  // bindCore(35 - dirID);
   Debug::notifyInfo("thread %d in memory nodes runs...\n", dirID);
 
   while (!stop_flag.load(std::memory_order_acquire)) {

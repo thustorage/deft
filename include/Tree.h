@@ -113,8 +113,8 @@ struct InternalEntry {
 
 struct __attribute__((packed)) LeafEntry {
   // uint8_t f_version : 4;
-  Key key = 0;
   Value value = 0;
+  Key key = 0;
   // uint8_t r_version : 4;
   bool operator<(const LeafEntry &rhs) const { return key < rhs.key; }
 };
@@ -609,7 +609,8 @@ class Tree {
 
   void print_and_check_tree(CoroContext *ctx = nullptr, int coro_id = 0);
 
-  void run_coroutine(CoroFunc func, int id, int coro_cnt, bool lock_bench);
+  void run_coroutine(CoroFunc func, int id, int coro_cnt, bool lock_bench,
+                     uint64_t total_ops);
 
   void lock_bench(const Key &k, CoroContext *ctx = nullptr, int coro_id = 0);
 
@@ -624,6 +625,9 @@ class Tree {
   // static thread_local int coro_id;
   static thread_local CoroCall worker[define::kMaxCoro];
   static thread_local CoroCall master;
+  static thread_local uint64_t coro_ops_total;
+  static thread_local uint64_t coro_ops_cnt_start;
+  static thread_local uint64_t coro_ops_cnt_finish;
 
   LocalLockNode *local_locks[MAX_MACHINE];
 

@@ -13,7 +13,7 @@ for ((i=1; i < ${num_clients}; i++)); do
   ip=${clients[$i]}
   echo "issue client ${i} ${ip} ${num_threads}"
   sshpass -p ${server_passwd} ssh ${ip} "cd ${exe_path} && ../script/run_client.sh $@ &> ../log/client_${i}.log" &
-  sleep 1
+  sleep 1s
 done
 
 # wait for ssh command to finish

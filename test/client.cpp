@@ -64,7 +64,7 @@ class RequsetGenBench : public RequstGen {
     r.v = 23;
     r.is_search = rand_r(&seed) % 100 < FLAGS_read_ratio;
 
-    tp[thread_id_][0]++;
+    // tp[thread_id_][0]++;
 
     return r;
   }
@@ -135,12 +135,12 @@ void thread_run(int id) {
   // warmup
   { // to free vector automatically
     uint64_t end_warm_key = FLAGS_warm_ratio * FLAGS_key_space;
-    uint64_t begin_warm_key;
-    if (my_id == 0) {
-      begin_warm_key = all_thread;
-    } else {
-      begin_warm_key = my_id;
-    }
+    uint64_t begin_warm_key = my_id;
+    // if (my_id == 0) {
+    //   begin_warm_key = all_thread;
+    // } else {
+    //   begin_warm_key = my_id;
+    // }
     // for (uint64_t i = begin_warm_key; i < end_warm_key; i += all_thread) {
     //   tree->insert(to_key(i), i * 2);
     // }
@@ -233,7 +233,12 @@ void thread_run(int id) {
 #else
   bool lock_bench = false;
 #endif
-  tree->run_coroutine(coro_func, id, kCoroCnt, lock_bench);
+  tree->run_coroutine(coro_func, id, kCoroCnt, lock_bench,
+                      FLAGS_ops_per_thread / 3);
+  total_timer.begin();
+  tree->run_coroutine(coro_func, id, kCoroCnt, lock_bench,
+                      FLAGS_ops_per_thread);
+  total_time[id][0] = total_timer.end();
 
 #else
 
@@ -387,7 +392,7 @@ int main(int argc, char *argv[]) {
     RawMessage m;
     m.type = RpcType ::TERMINATE;
     for (uint32_t i = 0; i < config.num_server; ++i) {
-      dsm_client->RpcCallDir(m, 0);
+      dsm_client->RpcCallDir(m, i);
     }
   }
   return 0;

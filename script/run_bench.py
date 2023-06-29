@@ -31,12 +31,12 @@ total_threads_arr = [i for i in range(12, 121, 12)]
 print(total_threads_arr)
 
 num_core_per_server = 18
+num_servers = 1
 num_clients = 4
 
 file_name = get_res_name("bench")
 with open(file_name, 'w') as fp:
     for total_threads in total_threads_arr:
-        num_servers = 1
         num_threads = (total_threads // num_clients)
 
         print(f'start: {total_threads} {num_clients} {num_threads}')
