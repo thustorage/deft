@@ -41,5 +41,6 @@ int main(int argc, char *argv[]) {
 
   dsm_server->Run();
 
+  printf("server stopped\n");
   return 0;
 }

@@ -121,7 +121,7 @@ void DSMClient::ReadBatch(RdmaOpRegion *rs, int k, bool signal,
   int node_id = -1;
   for (int i = 0; i < k; ++i) {
     GlobalAddress gaddr;
-    gaddr.val = rs[i].dest;
+    gaddr.raw = rs[i].dest;
     node_id = gaddr.nodeID;
     FillKeysDest(rs[i], gaddr, rs[i].is_on_chip);
   }
@@ -148,7 +148,7 @@ void DSMClient::WriteBatch(RdmaOpRegion *rs, int k, bool signal,
   int node_id = -1;
   for (int i = 0; i < k; ++i) {
     GlobalAddress gaddr;
-    gaddr.val = rs[i].dest;
+    gaddr.raw = rs[i].dest;
     node_id = gaddr.nodeID;
     FillKeysDest(rs[i], gaddr, rs[i].is_on_chip);
   }
@@ -175,14 +175,14 @@ void DSMClient::WriteFaa(RdmaOpRegion &write_ror, RdmaOpRegion &faa_ror,
   int node_id;
   {
     GlobalAddress gaddr;
-    gaddr.val = write_ror.dest;
+    gaddr.raw = write_ror.dest;
     node_id = gaddr.nodeID;
 
     FillKeysDest(write_ror, gaddr, write_ror.is_on_chip);
   }
   {
     GlobalAddress gaddr;
-    gaddr.val = faa_ror.dest;
+    gaddr.raw = faa_ror.dest;
 
     FillKeysDest(faa_ror, gaddr, faa_ror.is_on_chip);
   }
@@ -210,14 +210,14 @@ void DSMClient::WriteCas(RdmaOpRegion &write_ror, RdmaOpRegion &cas_ror,
   int node_id;
   {
     GlobalAddress gaddr;
-    gaddr.val = write_ror.dest;
+    gaddr.raw = write_ror.dest;
     node_id = gaddr.nodeID;
 
     FillKeysDest(write_ror, gaddr, write_ror.is_on_chip);
   }
   {
     GlobalAddress gaddr;
-    gaddr.val = cas_ror.dest;
+    gaddr.raw = cas_ror.dest;
 
     FillKeysDest(cas_ror, gaddr, cas_ror.is_on_chip);
   }
@@ -246,13 +246,13 @@ void DSMClient::CasRead(RdmaOpRegion &cas_ror, RdmaOpRegion &read_ror,
   int node_id;
   {
     GlobalAddress gaddr;
-    gaddr.val = cas_ror.dest;
+    gaddr.raw = cas_ror.dest;
     node_id = gaddr.nodeID;
     FillKeysDest(cas_ror, gaddr, cas_ror.is_on_chip);
   }
   {
     GlobalAddress gaddr;
-    gaddr.val = read_ror.dest;
+    gaddr.raw = read_ror.dest;
     FillKeysDest(read_ror, gaddr, read_ror.is_on_chip);
   }
 
@@ -283,13 +283,13 @@ void DSMClient::FaaRead(RdmaOpRegion &faa_ror, RdmaOpRegion &read_ror,
   int node_id;
   {
     GlobalAddress gaddr;
-    gaddr.val = faa_ror.dest;
+    gaddr.raw = faa_ror.dest;
     node_id = gaddr.nodeID;
     FillKeysDest(faa_ror, gaddr, faa_ror.is_on_chip);
   }
   {
     GlobalAddress gaddr;
-    gaddr.val = read_ror.dest;
+    gaddr.raw = read_ror.dest;
     FillKeysDest(read_ror, gaddr, read_ror.is_on_chip);
   }
 
@@ -318,13 +318,13 @@ void DSMClient::FaaBoundRead(RdmaOpRegion &faab_ror, RdmaOpRegion &read_ror,
   int node_id;
   {
     GlobalAddress gaddr;
-    gaddr.val = faab_ror.dest;
+    gaddr.raw = faab_ror.dest;
     node_id = gaddr.nodeID;
     FillKeysDest(faab_ror, gaddr, faab_ror.is_on_chip);
   }
   {
     GlobalAddress gaddr;
-    gaddr.val = read_ror.dest;
+    gaddr.raw = read_ror.dest;
     FillKeysDest(read_ror, gaddr, read_ror.is_on_chip);
   }
 
@@ -414,6 +414,57 @@ bool DSMClient::CasMaskSync(GlobalAddress gaddr, int log_sz, uint64_t equal,
     uint64_t *old = (uint64_t *)rdma_buffer;
     uint64_t *m = (uint64_t *)mask;
     for (int i = 0; i < (1 << (log_sz - 3)); i++) {
+      if ((eq[i] & m[i]) != (__bswap_64(old[i]) & m[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+}
+
+void DSMClient::CasMaskWrite(RdmaOpRegion &cas_ror, uint64_t equal,
+                             uint64_t swap, uint64_t mask,
+                             RdmaOpRegion &write_ror, bool signal,
+                             CoroContext *ctx) {
+  int node_id;
+  {
+    GlobalAddress gaddr;
+    gaddr.raw = cas_ror.dest;
+    node_id = gaddr.nodeID;
+    FillKeysDest(cas_ror, gaddr, cas_ror.is_on_chip);
+  }
+  {
+    GlobalAddress gaddr;
+    gaddr.raw = write_ror.dest;
+    FillKeysDest(write_ror, gaddr, write_ror.is_on_chip);
+  }
+
+  if (ctx == nullptr) {
+    rdmaCasMaskWrite(i_con_->data[0][node_id], cas_ror, equal, swap, mask,
+                     write_ror, signal);
+  } else {
+    rdmaCasMaskWrite(i_con_->data[0][node_id], cas_ror, equal, swap, mask,
+                     write_ror, true, ctx->coro_id);
+    (*ctx->yield)(*ctx->master);
+  }
+}
+
+bool DSMClient::CasMaskWriteSync(RdmaOpRegion &cas_ror, uint64_t equal,
+                                 uint64_t swap, uint64_t mask,
+                                 RdmaOpRegion &write_ror, CoroContext *ctx) {
+  CasMaskWrite(cas_ror, equal, swap, mask, write_ror, true, ctx);
+  if (ctx == nullptr) {
+    ibv_wc wc;
+    pollWithCQ(i_con_->cq, 1, &wc);
+  }
+
+  if (cas_ror.log_sz <= 3) {
+    return (equal & mask) == (*(uint64_t *)cas_ror.source & mask);
+  } else {
+    uint64_t *eq = (uint64_t *)equal;
+    uint64_t *old = (uint64_t *)cas_ror.source;
+    uint64_t *m = (uint64_t *)mask;
+    for (int i = 0; i < (1 << (cas_ror.log_sz - 3)); ++i) {
       if ((eq[i] & m[i]) != (__bswap_64(old[i]) & m[i])) {
         return false;
       }

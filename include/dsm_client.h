@@ -42,7 +42,7 @@ class DSMClient {
 
   // RDMA operations
   // buffer is registered memory
-  void Read(char *buffer, GlobalAddress gaddr, size_t size, bool signal = true,
+  void Read(char *buffer, GlobalAddress gaddr, size_t size, bool signal,
             CoroContext *ctx = nullptr);
   void ReadSync(char *buffer, GlobalAddress gaddr, size_t size,
                 CoroContext *ctx = nullptr);
@@ -101,11 +101,18 @@ class DSMClient {
                    uint64_t val, uint64_t *rdma_buffer, uint64_t mask = ~(0ull),
                    CoroContext *ctx = nullptr);
 
+  void CasMaskWrite(RdmaOpRegion &cas_ror, uint64_t equal, uint64_t swap,
+                    uint64_t mask, RdmaOpRegion &write_ror, bool signal = true,
+                    CoroContext *ctx = nullptr);
+  bool CasMaskWriteSync(RdmaOpRegion &cas_ror, uint64_t equal, uint64_t swap,
+                        uint64_t mask, RdmaOpRegion &write_ror,
+                        CoroContext *ctx = nullptr);
+
   void FaaBound(GlobalAddress gaddr, int log_sz, uint64_t add_val,
-                uint64_t *rdma_buffer, uint64_t mask = 63, bool signal = true,
+                uint64_t *rdma_buffer, uint64_t mask, bool signal = true,
                 CoroContext *ctx = nullptr);
   void FaaBoundSync(GlobalAddress gaddr, int log_sz, uint64_t add_val,
-                    uint64_t *rdma_buffer, uint64_t mask = 63,
+                    uint64_t *rdma_buffer, uint64_t mask,
                     CoroContext *ctx = nullptr);
 
   // for on-chip device memory

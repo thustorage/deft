@@ -24,7 +24,10 @@ constexpr int kOroMax = 3;
 struct RdmaOpRegion {
   uint64_t source;
   uint64_t dest;
-  uint64_t size;
+  union {
+    uint64_t size;
+    uint64_t log_sz;  // used for extended atomic
+  };
 
   uint32_t lkey;
   union {
@@ -146,6 +149,10 @@ bool rdmaFaaRead(ibv_qp *qp, const RdmaOpRegion &faab_ror,
 bool rdmaFaaBoundRead(ibv_qp *qp, const RdmaOpRegion &faab_ror,
                       const RdmaOpRegion &read_ror, uint64_t add,
                       uint64_t boundary, bool isSignaled, uint64_t wr_id = 0);
+bool rdmaCasMaskWrite(ibv_qp *qp, const RdmaOpRegion &cas_ror, uint64_t equal,
+                      uint64_t swap, uint64_t mask,
+                      const RdmaOpRegion &write_ror, bool isSignaled,
+                      uint64_t wr_id = 0);
 bool rdmaWriteFaa(ibv_qp *qp, const RdmaOpRegion &write_ror,
                   const RdmaOpRegion &faa_ror, uint64_t add_val,
                   bool isSignaled, uint64_t wrID = 0);

@@ -376,10 +376,10 @@ int main(int argc, char *argv[]) {
            (double)stat_lat[lat_read_page] / stat_cnt[lat_read_page]);
     printf("avg write page latency: %.1lf\n",
            (double)stat_lat[lat_write_page] / stat_cnt[lat_write_page]);
-    // printf("%d avg internal page search latency: %.1lf\n",
-    //        dsm_client->get_my_client_id(),
-    //        (double)stat_lat[lat_internal_search] /
-    //            stat_cnt[lat_internal_search]);
+    printf(
+        "%d avg internal page search latency: %.1lf\n",
+        dsm_client->get_my_client_id(),
+        (double)stat_lat[lat_internal_search] / stat_cnt[lat_internal_search]);
     // printf("%d avg cache search latency: %.1lf\n",
     //        dsm_client->get_my_client_id(),
     //        (double)stat_lat[lat_cache_search] / stat_cnt[lat_cache_search]);

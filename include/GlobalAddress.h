@@ -8,32 +8,28 @@ enum internal_granularity { gran_full, gran_half, gran_quarter };
 struct GlobalAddress {
   union {
     struct {
-      uint64_t offset : 48;
-      // uint64_t nodeID: 16;
+      uint64_t cl_ver : 4;        // cache line version
+      uint64_t node_version : 4;  // for child node in ptr
+      uint64_t read_gran : 4;     // for child node in ptr
       uint64_t nodeID : 4;
-      uint64_t child_gran : 2;  // for child
-      uint64_t group_gran : 2;  // myself, used in the last pointer of a group
-      uint64_t child_version : 4;
-      uint64_t group_node_version : 4;
+      uint64_t offset : 48;
     };
-    uint64_t val = 0;
+    uint64_t raw = 0;
   };
 
-  operator uint64_t() { return val; }
+  operator uint64_t() { return raw; }
 
-  // remain self group_gran and group_node_version!
+  // remain self cache line version!
   GlobalAddress &operator=(const GlobalAddress &other) {
-    uint8_t old_group_gran = group_gran;
-    uint8_t old_group_node_version = group_node_version;
-    val = other.val;
-    group_gran = old_group_gran;
-    group_node_version = old_group_node_version;
+    uint8_t ver = cl_ver;
+    raw = other.raw;
+    cl_ver = ver;
     return *this;
   }
 
   static GlobalAddress Null() {
     static GlobalAddress zero;
-    assert(zero.val == 0);
+    assert(zero.raw == 0);
     return zero;
   };
 } __attribute__((packed));
@@ -55,8 +51,7 @@ inline bool operator!=(const GlobalAddress &lhs, const GlobalAddress &rhs) {
 }
 
 inline std::ostream &operator<<(std::ostream &os, const GlobalAddress &obj) {
-  os << "[" << (int)obj.nodeID << ", " << obj.offset << ", "
-     << obj.group_node_version << "]";
+  os << "[" << (int)obj.nodeID << ", " << obj.offset << "]";
   return os;
 }
 

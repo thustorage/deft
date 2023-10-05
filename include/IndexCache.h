@@ -12,8 +12,6 @@
 #include "third_party/inlineskiplist.h"
 #include "thread_epoch.h"
 
-extern bool enter_debug;
-
 using CacheSkipList = InlineSkipList<CacheEntryComparator>;
 
 struct alignas(64) DelayFreeList {
@@ -27,9 +25,9 @@ class IndexCache {
   ~IndexCache();
 
   bool add_to_cache(InternalPage *page, int thread_id);
-  bool add_sub_node(GlobalAddress addr, InternalEntry *guard, int guard_offset,
-                    int group_id, int granularity, Key min, Key max,
-                    int thread_id);
+  bool add_sub_node(GlobalAddress addr, int group_id, int granularity,
+                    int guard_offset, InternalEntry *guard, int size, Key min,
+                    Key max, int thread_id);
   const CacheEntry *search_from_cache(const Key &k, GlobalAddress *addr,
                                       GlobalAddress *parent_addr);
 
@@ -136,13 +134,14 @@ inline const CacheEntry *IndexCache::find_entry(const Key &k) {
 }
 
 inline bool IndexCache::add_to_cache(InternalPage *page, int thread_id) {
-  auto new_page = (InternalPage *)malloc(kInternalPageSize);
+  InternalPage *new_page = (InternalPage *)malloc(kInternalPageSize);
   memcpy(reinterpret_cast<void *>(new_page), page, kInternalPageSize);
   new_page->hdr.index_cache_freq = 0;
   for (int i = 0 ; i < kMaxInternalGroup; ++i) {
     new_page->hdr.grp_in_cache[i] = true;
+    new_page->hdr.cache_read_gran[i] = page->hdr.read_gran;
   }
-  assert(new_page->hdr.myself != GlobalAddress::Null());
+  assert(new_page->hdr.my_addr != GlobalAddress::Null());
 
   if (this->add_entry(page->hdr.lowest, page->hdr.highest, new_page)) {
     auto v = free_page_cnt.fetch_sub(kMaxInternalGroup);
@@ -187,60 +186,48 @@ inline bool IndexCache::add_to_cache(InternalPage *page, int thread_id) {
   }
 }
 
-inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
-                                     int guard_offset, int group_id,
-                                     int granularity, Key min, Key max,
-                                     int thread_id) {
-  auto new_page = (InternalPage *)malloc(kInternalPageSize);
+inline bool IndexCache::add_sub_node(GlobalAddress addr, int group_id,
+                                     int granularity, int guard_offset,
+                                     InternalEntry *guard, int size, Key min,
+                                     Key max, int thread_id) {
+  InternalPage *new_page = (InternalPage *)malloc(kInternalPageSize);
   // memset(new_page, 0, kInternalPageSize);
-  size_t sz;
-  if (granularity == gran_quarter) {
-    sz = sizeof(InternalEntry) * (kGroupCardinality + 1);
-    assert((guard + kGroupCardinality)->ptr.group_gran == granularity);
-  } else {
-    assert(granularity == gran_half);
-    sz = sizeof(InternalEntry) * (kInternalCardinality / 2 + 1);
-    assert((guard + kInternalCardinality / 2)->ptr.group_gran == granularity);
-  }
 
   auto e = this->find_entry(min, max);
   if (e && e->from == min && e->to == max - 1) {  // update sub-node
-    auto ptr = e->ptr;
+    InternalPage *ptr = e->ptr;
     if (ptr) {
       // update
       memcpy(reinterpret_cast<char *>(new_page), ptr, kInternalPageSize);
-      memcpy(reinterpret_cast<char *>(new_page) + guard_offset, guard, sz);
-      InternalEntry *origin_guard = reinterpret_cast<InternalEntry *>(
-          reinterpret_cast<char *>(ptr) + guard_offset);
-      InternalEntry *new_guard = reinterpret_cast<InternalEntry *>(
-          reinterpret_cast<char *>(new_page) + guard_offset);
-      new_guard->ptr.group_gran = origin_guard->ptr.group_gran;
-      new_page->hdr.leftmost_ptr.group_gran =
-          std::min(ptr->hdr.leftmost_ptr.group_gran, (uint64_t)granularity);
+      memcpy(reinterpret_cast<char *>(new_page) + guard_offset, guard, size);
     } else {
       // add
       memset(reinterpret_cast<char *>(new_page), 0, kInternalPageSize);
-      memcpy(reinterpret_cast<char *>(new_page) + guard_offset, guard, sz);
+      memcpy(reinterpret_cast<char *>(new_page) + guard_offset, guard, size);
       new_page->hdr.lowest = min;
       new_page->hdr.highest = max;
       new_page->hdr.sibling_ptr = GlobalAddress::Null();
       new_page->hdr.level = 1;
       new_page->hdr.index_cache_freq = 0;
-      new_page->hdr.myself = addr;
-      new_page->hdr.leftmost_ptr.group_gran = granularity;
+      new_page->hdr.my_addr = addr;
     }
     int cnt = 0;
     if (granularity == gran_quarter) {
       new_page->hdr.grp_in_cache[group_id] = true;
+      new_page->hdr.cache_read_gran[group_id] = gran_quarter;
       cnt = 1;
     } else {
       cnt = 2;
       if (group_id < 2) {
         new_page->hdr.grp_in_cache[0] = true;
         new_page->hdr.grp_in_cache[1] = true;
+        new_page->hdr.cache_read_gran[0] = gran_half;
+        new_page->hdr.cache_read_gran[1] = gran_half;
       } else {
         new_page->hdr.grp_in_cache[2] = true;
         new_page->hdr.grp_in_cache[3] = true;
+        new_page->hdr.cache_read_gran[2] = gran_half;
+        new_page->hdr.cache_read_gran[3] = gran_half;
       }
     }
     if (__sync_bool_compare_and_swap(&(e->ptr), ptr, new_page)) {
@@ -272,26 +259,31 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, InternalEntry *guard,
   } else {
     // add
     memset(reinterpret_cast<char *>(new_page), 0, kInternalPageSize);
-    memcpy(reinterpret_cast<char *>(new_page) + guard_offset, guard, sz);
+    memcpy(reinterpret_cast<char *>(new_page) + guard_offset, guard, size);
     new_page->hdr.lowest = min;
     new_page->hdr.highest = max;
     new_page->hdr.sibling_ptr = GlobalAddress::Null();
     new_page->hdr.level = 1;
     new_page->hdr.index_cache_freq = 0;
-    new_page->hdr.myself = addr;
-    new_page->hdr.leftmost_ptr.group_gran = granularity;
+    new_page->hdr.my_addr = addr;
     int cnt = 0;
     if (granularity == gran_quarter) {
       cnt = 1;
       new_page->hdr.grp_in_cache[group_id] = true;
+      new_page->hdr.cache_read_gran[group_id] = gran_quarter;
+
     } else {
       cnt = 2;
       if (group_id < 2) {
         new_page->hdr.grp_in_cache[0] = true;
         new_page->hdr.grp_in_cache[1] = true;
+        new_page->hdr.cache_read_gran[0] = gran_half;
+        new_page->hdr.cache_read_gran[1] = gran_half;
       } else {
         new_page->hdr.grp_in_cache[2] = true;
         new_page->hdr.grp_in_cache[3] = true;
+        new_page->hdr.cache_read_gran[2] = gran_half;
+        new_page->hdr.cache_read_gran[3] = gran_half;
       }
     }
     if (this->add_entry(min, max, new_page)) {
@@ -318,42 +310,44 @@ inline const CacheEntry *IndexCache::search_from_cache(
     }
 
     int group_id = get_key_group(k, page->hdr.lowest, page->hdr.highest);
-    uint8_t cur_group_gran =
-        page->records[kGroupCardinality * (group_id + 1) - 1].ptr.group_gran;
-    int end, group_cnt;
+    if (page->hdr.grp_in_cache[group_id] == false) {
+      return nullptr;
+    }
+    uint8_t cur_group_gran = page->hdr.cache_read_gran[group_id];
+
+    int start_idx, cnt;
     if (cur_group_gran == gran_quarter) {
-      end = kGroupCardinality * (group_id + 1);
-      group_cnt = kGroupCardinality;
+      start_idx = kGroupCardinality * group_id;
+      cnt = kGroupCardinality;
     } else if (cur_group_gran == gran_half) {
-      end = group_id < 2 ? kGroupCardinality * 2 : kInternalCardinality;
-      group_cnt = kGroupCardinality * 2;
+      start_idx = group_id < 2 ? 0 : kGroupCardinality * 2;
+      cnt = kGroupCardinality * 2;
     } else {
       assert(cur_group_gran == gran_full);
-      end = kInternalCardinality;
-      group_cnt = kInternalCardinality;
+      start_idx = 0;
+      cnt = kInternalCardinality;
     }
-    InternalEntry *p = page->records + (end - 1);
-    InternalEntry *head = page->records + (end - group_cnt - 1);
-    *addr = GlobalAddress::Null();
-    while (p >= head) {
-      if (p->ptr == GlobalAddress::Null()) {
-        break;
-      } else if (k >= p->key) {
-        *addr = p->ptr;
-        break;
-      }
-      --p;
-    }
-    if (*addr == GlobalAddress::Null() && p > head) {
-      if (k >= head->key) {
-        *addr = head->ptr;
+    // find one more in previous group
+    --start_idx;
+    ++cnt;
+    InternalEntry *entries = page->records + start_idx;
+    int idx = -1;
+    for (int i = 0; i < cnt; ++i) {
+      if (entries[i].ptr != GlobalAddress::Null()) {
+        if (k >= entries[i].key) {
+          if (idx == -1 || entries[i].key > entries[idx].key) {
+            idx = i;
+          }
+        }
       }
     }
-    // assert(*addr != GlobalAddress::Null());
-    // compiler_barrier();
-    if (entry->ptr &&
-        *addr != GlobalAddress::Null()) {  // check if it is freed.
-      *parent_addr = page->hdr.myself;
+    if (idx != -1) {
+      *addr = entries[idx].ptr;
+    } else {
+      *addr = GlobalAddress::Null();
+    }
+    if (entry->ptr && *addr != GlobalAddress::Null()) {
+      *parent_addr = page->hdr.my_addr;
       return entry;
     }
   }

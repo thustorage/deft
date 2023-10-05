@@ -67,8 +67,8 @@ struct SearchResult {
   GlobalAddress next_level;
   Value val;
   Key other_in_group = 0;
-  Key min;
-  Key max;
+  Key next_min;
+  Key next_max;
 
   SearchResult() = default;
   void clear() {
@@ -79,27 +79,36 @@ struct SearchResult {
 constexpr int kMaxInternalGroup = 4;
 
 struct alignas(64) Header {
-// uint16_t level;
-  uint8_t padding[10];
-  uint8_t node_version;
+  uint8_t padding[6];
   // int8_t cnt = 0;
+  uint8_t version : 4;
+  uint8_t read_gran : 4;
   uint8_t level : 7;
   uint8_t is_root : 1;
-  uint8_t grp_in_cache[kMaxInternalGroup];  // used in cache
+  uint8_t cache_read_gran[kMaxInternalGroup];  // used in cache
+  uint8_t grp_in_cache[kMaxInternalGroup];     // used in cache
   uint64_t index_cache_freq;
-  GlobalAddress myself = GlobalAddress::Null(); // used in cache
+  GlobalAddress my_addr = GlobalAddress::Null();
 
-  Key highest = kKeyMax;
   GlobalAddress sibling_ptr = GlobalAddress::Null();
-  Key lowest = kKeyMin;
-  GlobalAddress leftmost_ptr = GlobalAddress::Null();
+  Key highest = kKeyMax;
 
-  Header() : node_version(0), level(0), is_root(false), index_cache_freq(0) {}
+  // align as a value-key pair
+  GlobalAddress leftmost_ptr = GlobalAddress::Null();
+  Key lowest = kKeyMin;
+
+  Header()
+      : version(0),
+        read_gran(gran_full),
+        level(0),
+        is_root(false),
+        index_cache_freq(0) {}
 
   void debug() const {
     std::cout << "leftmost=" << leftmost_ptr << ", "
               << "sibling=" << sibling_ptr << ", "
-              << "level=" << (int)level << ","
+              << "level=" << (int)level
+              << ","
               // << "cnt=" << cnt << ","
               << "range=[" << lowest << " - " << highest << "]";
   }
@@ -107,16 +116,49 @@ struct alignas(64) Header {
 static_assert(sizeof(Header) == 64);
 
 struct InternalEntry {
-  Key key = 0;
   GlobalAddress ptr;
+  Key key = 0;
+
+  bool operator<(const InternalEntry &rhs) const { return key < rhs.key; }
+};
+
+constexpr size_t kEntryPerCacheLine = 64 / sizeof(InternalEntry);
+
+struct __attribute__((packed)) LeafValue {
+  union {
+    struct {
+      uint64_t cl_ver : 4;  // cache line version
+      uint64_t val : 60;
+    };
+    uint64_t raw = 0;
+  };
+
+  LeafValue() = default;
+  LeafValue(uint8_t ver, uint64_t val) : cl_ver(ver), val(val) {}
+  // don't allow copy or assign
+  LeafValue(const LeafValue &other) = delete;
+  LeafValue &operator=(const LeafValue &other) = delete;
+  void copy(const LeafValue &other) { raw = other.raw; }
 };
 
 struct __attribute__((packed)) LeafEntry {
   // uint8_t f_version : 4;
-  Value value = 0;
+  LeafValue lv;
   Key key = 0;
   // uint8_t r_version : 4;
-  bool operator<(const LeafEntry &rhs) const { return key < rhs.key; }
+};
+
+// used for sort
+struct LeafKVEntry {
+  Value val = 0;
+  Key key = 0;
+
+  LeafKVEntry &operator=(const LeafEntry &rhs) {
+    val = rhs.lv.val;
+    key = rhs.key;
+    return *this;
+  }
+  bool operator<(const LeafKVEntry &rhs) const { return key < rhs.key; }
 };
 
 constexpr int kInternalCardinality =
@@ -164,13 +206,11 @@ class InternalPage {
   // only for new root node
   InternalPage(GlobalAddress left, const Key &key, GlobalAddress right,
                uint32_t level = 0) {
-    assert(left.group_gran == gran_full);
     hdr.leftmost_ptr = left;
     hdr.level = level;
-    records[kInternalCardinality - 1].key = key;
-    records[kInternalCardinality - 1].ptr = right;
+    records[0].key = key;
+    records[0].ptr = right;
     // records[1].ptr = GlobalAddress::Null();
-
     // hdr.cnt = 1;
   }
 
@@ -179,167 +219,70 @@ class InternalPage {
     // records[0].ptr = GlobalAddress::Null();
   }
 
-  void set_consistent() {}
-
-  bool check_consistent() const { return true; }
-
-  int try_update(const Key k, GlobalAddress v) {
-    // if (k == hdr.lowest) {
-    //   assert(hdr.leftmost_ptr == v);
-    //   hdr.leftmost_ptr = v;
-    //   return true;
-    // }
-
-    int group_id = get_key_group(k, hdr.lowest, hdr.highest);
-    uint8_t cur_group_gran =
-        records[kGroupCardinality * (group_id + 1) - 1].ptr.group_gran;
-    int end;  // not inclusive
-    int max_cnt;
-    if (cur_group_gran == gran_quarter) {
-      end = kGroupCardinality * (group_id + 1);
-      max_cnt = kGroupCardinality;
-    } else if (cur_group_gran == gran_half) {
-      end = group_id < 2 ? kGroupCardinality * 2 : kInternalCardinality;
-      max_cnt = kGroupCardinality * 2;
-    } else {
-      assert(cur_group_gran == gran_full);
-      end = kInternalCardinality;
-      max_cnt = kInternalCardinality;
+  uint8_t update_version() {
+    hdr.version += 1;
+    for (int i = 0; i < kInternalCardinality; i += kEntryPerCacheLine) {
+      records[i].ptr.cl_ver = hdr.version;
     }
+    return hdr.version;
+  }
 
-    int i = 0;
-    for (; i < max_cnt; ++i) {
-      int idx = end - 1 - i;
-      if (records[idx].ptr == GlobalAddress::Null()) {
-        break;
-      } else if (k == records[idx].key) {
-        records[idx].ptr = v;
-        return idx;
-      } else if (k > records[idx].key) {
-        break;
+  void restore_version(int begin_idx, int end_idx) {
+    int start_cache_idx = (begin_idx + kEntryPerCacheLine - 1) /
+                          kEntryPerCacheLine * kEntryPerCacheLine;
+    for (int i = start_cache_idx; i < end_idx; i += kEntryPerCacheLine) {
+      records[i].ptr.cl_ver = hdr.version;
+    }
+  }
+
+  bool check_consistency(char *start, char *end, uint8_t version,
+                         uint8_t &actual_version) {
+    assert(start >= (char *)(records - 1) &&
+           start <= (char *)(records + kInternalCardinality));
+    assert(end >= (char *)records &&
+           end <= (char *)(records + kInternalCardinality));
+    int start_idx = (start - (char *)records) / sizeof(InternalEntry);
+    int end_idx = (end - (char *)records) / sizeof(InternalEntry);
+    int start_cache_idx = (start_idx + kEntryPerCacheLine - 1) /
+                          kEntryPerCacheLine * kEntryPerCacheLine;
+    for (int i = start_cache_idx; i < end_idx; i += kEntryPerCacheLine) {
+      if (records[i].ptr.cl_ver != version) {
+        actual_version = records[i].ptr.cl_ver;
+        return false;
+      }
+    }
+    return true;
+  }
+
+  int find_empty(int begin, int cnt) {
+    for (int i = begin; i < begin + cnt; ++i) {
+      if (records[i].ptr == GlobalAddress::Null()) {
+        return i;
       }
     }
     return -1;
   }
 
-  bool gran_quarter_to_half_and_insert(int cur_group_id, int cur_insert_index,
-                                       const Key k, GlobalAddress v) {
-    // cur_group is full
-    int cur_end = (cur_group_id + 1) * kGroupCardinality;
-    assert(cur_insert_index < cur_end &&
-           cur_insert_index >= cur_end - kGroupCardinality - 1);
-    if (cur_group_id % 2 == 0) {
-      // left, shift to right
-      // cur_left, insert_index, cur_right, right group
-      int i = cur_end;
-      for (; i < cur_end + kGroupCardinality; ++i) {
-        if (records[i].ptr != GlobalAddress::Null()) {
-          break;
-        }
-      }
-      if (i == cur_end) {
-        // neighbour is full
-        return false;
-      }
-      // [insert_index + 1, end - 1] -> [x, i - 1]
-      int diff = i - cur_end;
-      for (int j = cur_end - 1; j > cur_insert_index; --j) {
-        records[j + diff] = records[j];
-      }
-      records[cur_insert_index + diff].key = k;
-      records[cur_insert_index + diff].ptr = v;
-      // [end - group_cnt, insert_index] shift to right by (diff - 1)
-      for (int j = cur_insert_index; j >= cur_end - kGroupCardinality; --j) {
-        records[j + diff - 1] = records[j];
-      }
-      memset(reinterpret_cast<void *>(records + cur_end - kGroupCardinality), 0,
-             sizeof(InternalEntry) * (diff - 1));
+  int find_records_not_null(const Key &k) {
+    int group_id = get_key_group(k, hdr.lowest, hdr.highest);
+    int start_idx, end_idx;
+    if (hdr.read_gran == gran_quarter) {
+      start_idx = group_id * kGroupCardinality;
+      end_idx = start_idx + kGroupCardinality;
+    } else if (hdr.read_gran == gran_half) {
+      start_idx = group_id < 2 ? 0 : kGroupCardinality * 2;
+      end_idx = start_idx + kGroupCardinality * 2;
     } else {
-      // right
-      // left group, cur left, insert, cur right
-      int left_margin = cur_end - kGroupCardinality * 2;
-      if (records[left_margin].ptr != GlobalAddress::Null()) {
-        // neighbour is full
-        return false;
-      }
-      // [left_margin + 1, insert_index], shift to left by 1
-      for (int j = left_margin + 1; j <= cur_insert_index; ++j) {
-        records[j - 1] = records[j];
-      }
-      records[cur_insert_index].key = k;
-      records[cur_insert_index].ptr = v;
+      assert(hdr.read_gran == gran_full);
+      start_idx = 0;
+      end_idx = kInternalCardinality;
     }
-    // ++hdr.cnt;
-    return true;
-  }
-
-  void gran_quarter_to_half(bool left_half) {
-    int mid = left_half ? kGroupCardinality : kGroupCardinality * 3;
-
-    int i = mid;
-    for (; i < mid + kGroupCardinality; ++i) {
-      if (records[i].ptr != GlobalAddress::Null()) {
-        break;
+    for (int i = start_idx; i < end_idx; ++i) {
+      if (records[i].key == k && records[i].ptr != GlobalAddress::Null()) {
+        return i;
       }
     }
-    if (i == mid) {
-      // already in half, don't forget to update gran in ptr
-      return;
-    } else {
-      int diff = i - mid;
-      // shift right
-      for (int j = mid - 1; j >= mid - kGroupCardinality; --j) {
-        records[j + diff] = records[j];
-      }
-      memset(reinterpret_cast<void *>(records + mid - kGroupCardinality), 0,
-             sizeof(InternalEntry) * diff);
-    }
-  }
-
-  bool gran_half_to_full_and_insert(int insert_index, const Key k,
-                                    GlobalAddress v) {
-    if (insert_index < kGroupCardinality * 2) {
-      // cur in left half
-      // cur_left, insert, cur_right, right half
-      int cur_end = kGroupCardinality * 2;
-      int i = cur_end;
-      for (; i < kInternalCardinality; ++i) {
-        if (records[i].ptr != GlobalAddress::Null()) {
-          break;
-        }
-      }
-      if (i == cur_end) {
-        // neighbour is full
-        return false;
-      }
-      // [insert_index + 1, end - 1] -> [x, i - 1]
-      int diff = i - cur_end;
-      for (int j = cur_end - 1; j > insert_index; --j) {
-        records[j + diff] = records[j];
-      }
-      records[insert_index + diff].key = k;
-      records[insert_index + diff].ptr = v;
-      for (int j = insert_index; j >= 0; --j) {
-        records[j + diff - 1] = records[j];
-      }
-      memset(reinterpret_cast<void *>(records), 0,
-             sizeof(InternalEntry) * (diff - 1));
-    } else {
-      // right
-      // left half, cur left, insert, cur right
-      if (records[0].ptr != GlobalAddress::Null()) {
-        // neighbour is full
-        return false;
-      }
-      // [1, insert_index], shift left by 1
-      for (int i = 1; i <= insert_index; ++i) {
-        records[i - 1] = records[i];
-      }
-      records[insert_index].key = k;
-      records[insert_index].ptr = v;
-    }
-    // ++hdr.cnt;
-    return true;
+    return -1;
   }
 
   int rearrange_records(InternalEntry *entries, size_t cnt, Key min, Key max) {
@@ -378,11 +321,14 @@ class InternalPage {
     if (new_gran != gran_half) {
       for (int i = 0; i < 4; ++i) {
         if (group_cnt[i] > 0) {
-          int cur_start = (i + 1) * kGroupCardinality - group_cnt[i];
-          for (int j = 0; j < group_cnt[i]; ++j) {
-            records[cur_start + j] = *p;
+          int start = i * kGroupCardinality;
+          for (int j = 0; j < group_cnt[i] - 1; ++j) {
+            records[start + j] = *p;
             ++p;
           }
+          // put the last one in the rightmost
+          records[start + kGroupCardinality - 1] = *p;
+          ++p;
         }
       }
     } else {
@@ -390,34 +336,20 @@ class InternalPage {
       group_cnt[1] = group_cnt[2] + group_cnt[3];
       for (int i = 0; i < 2; ++i) {
         if (group_cnt[i] > 0) {
-          int cur_start = (i + 1) * kGroupCardinality * 2 - group_cnt[i];
-          for (int j = 0; j < group_cnt[i]; ++j) {
-            records[cur_start + j] = *p;
+          int start = i * kGroupCardinality * 2;
+          for (int j = 0; j < group_cnt[i] - 1; ++j) {
+            records[start + j] = *p;
             ++p;
           }
+          // put the last one in the rightmost
+          records[start + kGroupCardinality * 2 - 1] = *p;
+          ++p;
         }
       }
     }
 
-    hdr.leftmost_ptr.group_gran = new_gran;
-    records[kGroupCardinality - 1].ptr.group_gran = new_gran;
-    records[2 * kGroupCardinality - 1].ptr.group_gran = new_gran;
-    records[3 * kGroupCardinality - 1].ptr.group_gran = new_gran;
-    records[kInternalCardinality - 1].ptr.group_gran = new_gran;
-
-    hdr.leftmost_ptr.group_node_version = hdr.node_version;
-    records[kGroupCardinality - 1].ptr.group_node_version = hdr.node_version;
-    records[2 * kGroupCardinality - 1].ptr.group_node_version =
-        hdr.node_version;
-    records[3 * kGroupCardinality - 1].ptr.group_node_version =
-        hdr.node_version;
-    records[kInternalCardinality - 1].ptr.group_node_version = hdr.node_version;
+    hdr.read_gran = new_gran;
     return new_gran;
-  }
-
-  uint8_t update_node_version() {
-    hdr.node_version = (hdr.node_version + 1) % (1u << 4);  // only 4 bit in ptr
-    return hdr.node_version;
   }
 
   void debug() const {
@@ -428,7 +360,7 @@ class InternalPage {
   void verbose_debug() const {
     this->debug();
     for (int i = 0; i < kInternalCardinality; ++i) {
-      printf("[%lu %lu] ", this->records[i].key, this->records[i].ptr.val);
+      printf("[%lu %lu] ", this->records[i].key, this->records[i].ptr.raw);
     }
     printf("\n");
   }
@@ -437,122 +369,140 @@ class InternalPage {
 
 // LeafEntry Group in leaf page
 
-// constexpr int kAssociativity = 5;
-// constexpr int kNumBucket = 8;
-// constexpr int kNumGroup = kNumBucket / 2;
-// constexpr int kGroupSize = kAssociativity * 3;
-// constexpr int kLeafCardinality = kNumGroup * kAssociativity * 3;
-
 constexpr int kAssociativity = 4;
 constexpr int kNumBucket = 10;
 constexpr int kNumGroup = kNumBucket / 2;
 constexpr int kGroupSize = kAssociativity * 3;
 constexpr int kLeafCardinality = kNumGroup * kAssociativity * 3;
 
-constexpr int kOverflowAssociativity = kAssociativity - 1;
-
 static inline int key_hash_bucket(const Key &k) { return k % kNumBucket; }
 
 struct __attribute__((packed)) LeafEntryGroup {
-  uint32_t version_front_front = 0;
   LeafEntry front[kAssociativity];
-  uint32_t version_back_front = 0;
-  LeafEntry overflow[kAssociativity - 1];
-  uint32_t version_front_back = 0;
+  LeafEntry overflow[kAssociativity];
   LeafEntry back[kAssociativity];
-  uint32_t version_back_back = 0;
+
+  bool check_consistency(bool is_front, uint8_t version,
+                         uint8_t &actual_version) {
+    if (is_front) {
+      if (front[0].lv.cl_ver != version) {
+        actual_version = front[0].lv.cl_ver;
+        return false;
+      }
+    } else {
+      if (back[0].lv.cl_ver != version) {
+        actual_version = back[0].lv.cl_ver;
+        return false;
+      }
+    }
+    if (overflow[0].lv.cl_ver != version) {
+      actual_version = overflow[0].lv.cl_ver;
+      return false;
+    }
+    return true;
+  }
+
+  void set_version(uint8_t ver) {
+    front[0].lv.cl_ver = ver;
+    overflow[0].lv.cl_ver = ver;
+    back[0].lv.cl_ver = ver;
+  }
 
   bool find(const Key &k, SearchResult &result, bool is_front) {
     if (is_front) {
       for (int i = 0; i < kAssociativity; ++i) {
-        if (front[i].key == k && front[i].value != kValueNull) {
-          result.val = front[i].value;
+        if (front[i].key == k && front[i].lv.val != kValueNull) {
+          result.val = front[i].lv.val;
           return true;
         }
       }
     } else {
       for (int i = 0; i < kAssociativity; ++i) {
-        if (back[i].key == k && back[i].value != kValueNull) {
-          result.val = back[i].value;
+        if (back[i].key == k && back[i].lv.val != kValueNull) {
+          result.val = back[i].lv.val;
           return true;
         }
       }
     }
-    for (int i = 0; i < kAssociativity - 1; ++i) {
-      if (overflow[i].key == k && overflow[i].value != kValueNull) {
-        result.val = overflow[i].value;
+    for (int i = 0; i < kAssociativity; ++i) {
+      if (overflow[i].key == k && overflow[i].lv.val != kValueNull) {
+        result.val = overflow[i].lv.val;
         return true;
       }
     }
     return false;
   }
 
-  bool insert(const Key &k, const Value v, bool is_front) {
+  bool insert_for_split(const Key &k, const Value v, bool is_front) {
     if (is_front) {
       for (int i = 0; i < kAssociativity; ++i) {
         if (front[i].key == k) {
-          front[i].value = v;
+          front[i].lv.val = v;
           return true;
-        } else if (front[i].value == kValueNull) {
+        } else if (front[i].lv.val == kValueNull) {
           front[i].key = k;
-          front[i].value = v;
+          front[i].lv.val = v;
           return true;
         }
       }
     } else {
       for (int i = 0; i < kAssociativity; ++i) {
         if (back[i].key == k) {
-          back[i].value = v;
+          back[i].lv.val = v;
           return true;
-        } else if (back[i].value == kValueNull) {
+        } else if (back[i].lv.val == kValueNull) {
           back[i].key = k;
-          back[i].value = v;
+          back[i].lv.val = v;
           return true;
         }
       }
     }
-    for (int i = 0; i < kAssociativity - 1; ++i) {
+    for (int i = 0; i < kAssociativity; ++i) {
       if (overflow[i].key == k) {
-        overflow[i].value = v;
+        overflow[i].lv.val = v;
         return true;
-      } else if (overflow[i].value == kValueNull) {
+      } else if (overflow[i].lv.val == kValueNull) {
         overflow[i].key = k;
-        overflow[i].value = v;
+        overflow[i].lv.val = v;
         return true;
       }
     }
     return false;
   }
 
-  bool update(const Key &k, const Value v, bool is_front) {
-    if (is_front) {
-      for (int i = 0; i < kAssociativity; ++i) {
-        if (front[i].key == k) {
-          front[i].value = v;
-          return true;
+  bool find(const Key &k, bool is_front, LeafEntry **entry_addr,
+            LeafEntry **empty_addr) {
+    // find main bucket
+    LeafEntry *bucket = is_front ? front : back;
+    for (int i = 0; i < kAssociativity; ++i) {
+      if (bucket[i].key == k) {
+        if (entry_addr) {
+          *entry_addr = &bucket[i];
         }
-      }
-    } else {
-      for (int i = 0; i < kAssociativity; ++i) {
-        if (back[i].key == k) {
-          back[i].value = v;
-          return true;
-        }
+        return true;
+      } else if (bucket[i].lv.val == kValueNull && empty_addr &&
+                 *empty_addr == nullptr) {
+        *empty_addr = &bucket[i];
       }
     }
-    for (int i = 0; i < kAssociativity - 1; ++i) {
+    // find overflow
+    for (int i = 0; i < kAssociativity; ++i) {
       if (overflow[i].key == k) {
-        overflow[i].value = v;
+        if (entry_addr) {
+          *entry_addr = &overflow[i];
+        }
         return true;
+      } else if (overflow[i].lv.val == kValueNull && empty_addr &&
+                 *empty_addr == nullptr) {
+        *empty_addr = &overflow[i];
       }
     }
     return false;
   }
 };
 constexpr size_t kFrontOffset = 0;
-constexpr size_t kBackOffset = offsetof(LeafEntryGroup, version_back_front);
-constexpr size_t kReadBucketSize =
-    sizeof(int) * 3 + sizeof(LeafEntry) * (2 * kAssociativity - 1);
+constexpr size_t kBackOffset = offsetof(LeafEntryGroup, overflow);
+constexpr size_t kReadBucketSize = sizeof(LeafEntry) * kAssociativity * 2;
 
 class LeafPage {
  private:
@@ -572,21 +522,13 @@ class LeafPage {
     // records[0].value = kValueNull;
   }
 
-  uint8_t update_node_version() {
-    hdr.node_version = (hdr.node_version + 1) % (1u << 4);  // only 4 bit in ptr
+  uint8_t update_version() {
+    hdr.version += 1;
     for (int i = 0; i < kNumGroup; ++i) {
-      groups[i].version_front_front = hdr.node_version;
-      groups[i].version_back_front = hdr.node_version;
-      groups[i].version_front_back = hdr.node_version;
-      groups[i].version_back_back = hdr.node_version;
+      groups[i].set_version(hdr.version);
     }
-    return hdr.node_version;
+    return hdr.version;
   }
-
-  bool insert_for_split(const Key &k, const Value v, int bucket_id) {
-    return groups[bucket_id / 2].insert(k, v, !(bucket_id % 2));
-  }
-
   void debug() const {
     std::cout << "LeafPage@ ";
     hdr.debug();
@@ -598,16 +540,13 @@ class Tree {
   Tree(DSMClient *dsm, uint16_t tree_id = 0);
   ~Tree();
 
-  void insert(const Key &k, const Value &v, CoroContext *ctx = nullptr,
-              int coro_id = 0);
+  void insert(const Key &k, const Value &v, CoroContext *ctx = nullptr);
   bool search(const Key &k, Value &v, CoroContext *ctx = nullptr,
               int coro_id = 0);
   void del(const Key &k, CoroContext *ctx = nullptr, int coro_id = 0);
 
   uint64_t range_query(const Key &from, const Key &to, Value *buffer,
                        CoroContext *ctx = nullptr, int coro_id = 0);
-
-  void print_and_check_tree(CoroContext *ctx = nullptr, int coro_id = 0);
 
   void run_coroutine(CoroFunc func, int id, int coro_cnt, bool lock_bench,
                      uint64_t total_ops);
@@ -638,8 +577,7 @@ class Tree {
   void before_operation(CoroContext *ctx, int coro_id);
 
   GlobalAddress get_root_ptr_ptr();
-  GlobalAddress get_root_ptr(CoroContext *ctx, int coro_id,
-                             bool force_read = false);
+  GlobalAddress get_root_ptr(CoroContext *ctx, bool force_read = false);
 
   void coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
                    bool lock_bench);
@@ -647,80 +585,75 @@ class Tree {
 
   // void broadcast_new_root(GlobalAddress new_root_addr, int root_level);
   bool update_new_root(GlobalAddress left, const Key &k, GlobalAddress right,
-                       int level, GlobalAddress old_root, CoroContext *ctx,
-                       int coro_id);
+                       int level, GlobalAddress old_root, CoroContext *ctx);
 
   void insert_internal_update_left_child(const Key &k, GlobalAddress v,
                                          const Key &left_child,
                                          GlobalAddress left_child_val,
-                                         CoroContext *ctx, int coro_id,
-                                         int level);
+                                         CoroContext *ctx, int level);
 
-  bool try_lock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *ctx,
-                     int coro_id);
+  bool try_lock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *ctx);
   void unlock_addr(GlobalAddress lock_addr, uint64_t *buf, CoroContext *ctx,
-                   int coro_id, bool async);
-  bool acquire_x_lock(GlobalAddress lock_addr, int group_id,
-                      bool upgrade_from_s, uint64_t *buf, CoroContext *ctx,
-                      int coro_id);
-  void release_x_lock(GlobalAddress lock_addr, int group_id, uint64_t *buf,
-                      CoroContext *ctx, int coro_id, bool async);
-  bool acquire_s_lock(GlobalAddress lock_addr, int group_id, uint64_t *buf,
-                      CoroContext *ctx, int coro_id);
-  void release_s_lock(GlobalAddress lock_addr, int group_id, uint64_t *buf,
-                      CoroContext *ctx, int coro_id, bool async);
-  bool acquire_sx_lock(GlobalAddress lock_addr, int group_id, uint64_t *buf,
-                       CoroContext *ctx, int coro_id, bool sx_lock,
+                   bool async);
+  void acquire_sx_lock(GlobalAddress lock_addr, uint64_t *lock_buffer,
+                       CoroContext *ctx, bool share_lock,
                        bool upgrade_from_s = false);
-  void release_sx_lock(GlobalAddress lock_addr, int group_id, uint64_t *buf,
-                       CoroContext *ctx, int coro_id, bool async, bool sx_lock);
+  void release_sx_lock(GlobalAddress lock_addr, uint64_t *lock_buffer,
+                       CoroContext *ctx, bool async, bool share_lock);
+  void acquire_lock(GlobalAddress lock_addr, uint64_t *lock_buffer,
+                    CoroContext *ctx, bool share_lock,
+                    bool upgrade_from_s = false);
+  void release_lock(GlobalAddress lock_addr, uint64_t *lock_buffer,
+                    CoroContext *ctx, bool async, bool share_lock);
   void write_and_unlock(char *write_buffer, GlobalAddress write_addr,
                         int write_size, uint64_t *cas_buffer,
-                        GlobalAddress lock_addr, int group_id, CoroContext *ctx,
-                        int coro_id, bool async, bool sx_lock);
-  bool batch_lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
-                                int page_size, uint64_t *cas_buffer,
-                                GlobalAddress lock_addr, int group_id,
-                                CoroContext *ctx, int coro_id, bool sx_lock,
-                                bool upgrade_from_s = false);
-  bool lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
-                          int page_size, uint64_t *cas_buffer,
-                          GlobalAddress lock_addr, int group_id,
-                          CoroContext *ctx, int coro_id, bool sx_lock,
-                          bool upgrade_from_s = false);
+                        GlobalAddress lock_addr, CoroContext *ctx, bool async,
+                        bool sx_lock);
+  void cas_and_unlock(GlobalAddress cas_addr, int log_cas_size,
+                      uint64_t *cas_buffer, uint64_t equal, uint64_t swap,
+                      uint64_t mask, GlobalAddress lock_addr,
+                      uint64_t *lock_buffer, bool share_lock, CoroContext *ctx,
+                      bool async);
+  void lock_and_read(GlobalAddress lock_addr, bool share_lock,
+                     bool upgrade_from_s, uint64_t *lock_buffer,
+                     GlobalAddress read_addr, int read_size, char *read_buffer,
+                     CoroContext *ctx);
+  void lock_read_read(GlobalAddress lock_addr, bool share_lock,
+                      bool upgrade_from_s, uint64_t *lock_buffer,
+                      GlobalAddress r1_addr, int r1_size, char *r1_buffer,
+                      GlobalAddress r2_addr, int r2_size, char *r2_buffer,
+                      CoroContext *ctx);
 
   bool leaf_page_group_search(GlobalAddress page_addr, const Key &k,
                               SearchResult &result, CoroContext *ctx,
-                              int coro_id, bool from_cache);
+                              bool from_cache);
   bool page_search(GlobalAddress page_addr, int level_hint, int read_gran,
                    Key min, Key max, const Key &k, SearchResult &result,
-                   CoroContext *ctx, int coro_id, bool from_cache = false);
-  void internal_page_slice_search(InternalEntry *entries, int cnt, const Key k,
+                   CoroContext *ctx, bool from_cache = false);
+  bool internal_page_slice_search(InternalEntry *entries, int cnt, const Key k,
                                   SearchResult &result);
-  bool try_group_search(LeafEntry *records, const Key &k, SearchResult &result);
 
   void update_ptr_internal(const Key &k, GlobalAddress v, CoroContext *ctx,
-                           int coro_id, int level);
-  void internal_page_store(GlobalAddress page_addr, const Key &k,
-                           GlobalAddress value, GlobalAddress root, int level,
-                           CoroContext *ctx, int coro_id);
+                           int level);
+  // void internal_page_store(GlobalAddress page_addr, const Key &k,
+  //                          GlobalAddress value, GlobalAddress root, int level,
+  //                          CoroContext *ctx);
   void internal_page_update(GlobalAddress page_addr, const Key &k,
                             GlobalAddress value, int level, CoroContext *ctx,
-                            int coro_id, bool sx_lock);
+                            bool sx_lock);
   void internal_page_store_update_left_child(GlobalAddress page_addr,
                                              const Key &k, GlobalAddress value,
                                              const Key &left_child,
                                              GlobalAddress left_child_val,
                                              GlobalAddress root, int level,
-                                             CoroContext *ctx, int coro_id);
-  bool try_leaf_page_upsert(GlobalAddress page_addr, GlobalAddress lock_addr,
-                            const Key &k, const Value &v, bool allow_insert,
-                            CoroContext *ctx, int coro_id,
-                            bool sx_lock = false);
+                                             CoroContext *ctx);
+  // bool try_leaf_page_upsert(GlobalAddress page_addr, char *page_buffer,
+  //                           GlobalAddress lock_addr, uint64_t *lock_buffer,
+  //                           const Key &k, const Value &v, CoroContext *ctx,
+  //                           int coro_id, bool share_lock);
   bool leaf_page_store(GlobalAddress page_addr, const Key &k, const Value &v,
                        GlobalAddress root, int level, CoroContext *ctx,
-                       int coro_id, bool from_cache = false,
-                       bool sx_lock = false);
+                       bool from_cache = false, bool share_lock = false);
   bool leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
                      CoroContext *ctx, int coro_id, bool from_cache = false);
 
