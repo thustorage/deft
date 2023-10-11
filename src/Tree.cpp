@@ -881,8 +881,8 @@ next:
   }
 }
 
-uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
-                           CoroContext *ctx, int coro_id) {
+int Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
+                      int max_cnt, CoroContext *ctx, int coro_id) {
   const int kParaFetch = 32;
   thread_local std::vector<InternalPage *> result;
   thread_local std::vector<GlobalAddress> leaves;
@@ -900,27 +900,31 @@ uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
     return 0;
   }
 
-  uint64_t counter = 0;
+  int counter = 0;
   for (auto page : result) {
-    // auto cnt = page->hdr.cnt;
-    int prev_idx = -1;
-    int idx = 0;
-    while (idx < kInternalCardinality) {
-      if (page->records[idx].key == 0 ||
-          page->records[idx].ptr == GlobalAddress::Null()) {
-        ++idx;
-        continue;
+    std::vector<InternalEntry> tmp_records;
+    tmp_records.reserve(kInternalCardinality);
+    for (int i = 0; i < kInternalCardinality; ++i) {
+      if (page->records[i].ptr != GlobalAddress::Null()) {
+        tmp_records.push_back(page->records[i]);
       }
-      InternalEntry *prev =
-          reinterpret_cast<InternalEntry *>(page->records + prev_idx);
-      if (prev->key <= to && page->records[idx].key >= from) {
-        leaves.push_back(prev->ptr);
+    }
+    std::sort(tmp_records.begin(), tmp_records.end());
+    int cnt = tmp_records.size();
+    if (cnt > 0) {
+      if (page->hdr.leftmost_ptr != GlobalAddress::Null()) {
+        if (tmp_records[0].key > from && page->hdr.lowest < to) {
+          leaves.push_back(page->hdr.leftmost_ptr);
+        }
       }
-      prev_idx = idx;
-      if (page->records[idx].key >= to) {
-        break;
+      for (int i = 1; i < cnt; i++) {
+        if (tmp_records[i].key > from && tmp_records[i - 1].key < to) {
+          leaves.push_back(tmp_records[i - 1].ptr);
+        }
       }
-      ++idx;
+      if (page->hdr.highest > from && tmp_records[cnt - 1].key < to) {
+        leaves.push_back(tmp_records[cnt - 1].ptr);
+      }
     }
   }
 
@@ -930,23 +934,23 @@ uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
     if (i > 0 && i % kParaFetch == 0) {
       dsm_client_->PollRdmaCq(kParaFetch);
       cq_cnt -= kParaFetch;
-      for (int k = 0; k < kParaFetch; ++k) {
+      for (int k = 0; counter < max_cnt && k < kParaFetch; ++k) {
         auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
-        for (int idx = 0; idx < kNumGroup; ++idx) {
+        for (int idx = 0; counter < max_cnt && idx < kNumGroup; ++idx) {
           LeafEntryGroup *g = &page->groups[idx];
-          for (int j = 0; j < kAssociativity; ++j) {
+          for (int j = 0; counter < max_cnt && j < kAssociativity; ++j) {
             auto &r = g->front[j];
             if (r.lv.val != kValueNull && r.key >= from && r.key < to) {
               value_buffer[counter++] = r.lv.val;
             }
           }
-          for (int j = 0; j < kAssociativity; ++j) {
+          for (int j = 0; counter < max_cnt && j < kAssociativity; ++j) {
             auto &r = g->back[j];
             if (r.lv.val != kValueNull && r.key >= from && r.key < to) {
               value_buffer[counter++] = r.lv.val;
             }
           }
-          for (int j = 0; j < kAssociativity; ++j) {
+          for (int j = 0; counter < max_cnt && j < kAssociativity; ++j) {
             auto &r = g->overflow[j];
             if (r.lv.val != kValueNull && r.key >= from && r.key < to) {
               value_buffer[counter++] = r.lv.val;
@@ -962,23 +966,23 @@ uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
 
   if (cq_cnt != 0) {
     dsm_client_->PollRdmaCq(cq_cnt);
-    for (int k = 0; k < cq_cnt; ++k) {
+    for (int k = 0; counter < max_cnt && k < cq_cnt; ++k) {
       auto page = (LeafPage *)(range_buffer + k * kLeafPageSize);
-      for (int idx = 0; idx < kNumGroup; ++idx) {
+      for (int idx = 0; counter < max_cnt && idx < kNumGroup; ++idx) {
         LeafEntryGroup *g = &page->groups[idx];
-        for (int j = 0; j < kAssociativity; ++j) {
+        for (int j = 0; counter < max_cnt && j < kAssociativity; ++j) {
           LeafEntry &r = g->front[j];
           if (r.lv.val != kValueNull && r.key >= from && r.key < to) {
             value_buffer[counter++] = r.lv.val;
           }
         }
-        for (int j = 0; j < kAssociativity; ++j) {
+        for (int j = 0; counter < max_cnt && j < kAssociativity; ++j) {
           auto &r = g->back[j];
           if (r.lv.val != kValueNull && r.key >= from && r.key < to) {
             value_buffer[counter++] = r.lv.val;
           }
         }
-        for (int j = 0; j < kAssociativity; ++j) {
+        for (int j = 0; counter < max_cnt && j < kAssociativity; ++j) {
           auto &r = g->overflow[j];
           if (r.lv.val != kValueNull && r.key >= from && r.key < to) {
             value_buffer[counter++] = r.lv.val;

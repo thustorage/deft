@@ -545,8 +545,8 @@ class Tree {
               int coro_id = 0);
   void del(const Key &k, CoroContext *ctx = nullptr, int coro_id = 0);
 
-  uint64_t range_query(const Key &from, const Key &to, Value *buffer,
-                       CoroContext *ctx = nullptr, int coro_id = 0);
+  int range_query(const Key &from, const Key &to, Value *buffer, int max_cnt,
+                  CoroContext *ctx = nullptr, int coro_id = 0);
 
   void run_coroutine(CoroFunc func, int id, int coro_cnt, bool lock_bench,
                      uint64_t total_ops);

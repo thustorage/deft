@@ -27,12 +27,12 @@ def exec_command(command):
 
 subprocess.run(f'make -j', shell=True)
 
-total_threads_arr = [i for i in range(12, 121, 12)]
+total_threads_arr = [i for i in range(15, 151, 15)]
 print(total_threads_arr)
 
 num_core_per_server = 18
 num_servers = 1
-num_clients = 4
+num_clients = 5
 
 file_name = get_res_name("bench")
 with open(file_name, 'w') as fp:

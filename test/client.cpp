@@ -271,7 +271,7 @@ void thread_run(int id) {
     // Value buffer[101];
     if (rand_r(&seed) % 100 < FLAGS_read_ratio) {  // GET
       tree->search(key, v);
-      // tree->range_query(key, key + 100, buffer);
+      // tree->range_query(key, key + 100, buffer, 100);
     } else {
       v = 12;
       tree->insert(key, v);
