@@ -11,5 +11,5 @@ num_servers=${#clients[@]}
 for ((i=0; i < ${num_servers}; i++)); do
   ip=${clients[$i]}
   echo "hugepage ${ip}"
-  sshpass -p ${server_passwd} ssh ${ip} 'sudo sh -c "echo 0 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages"'
+  sshpass -p ${server_passwd} ssh ${ip} 'sudo sysctl -w vm.nr_hugepages=0'
 done

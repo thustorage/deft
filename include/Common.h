@@ -22,6 +22,8 @@
 // #define CONFIG_ENABLE_EMBEDDING_LOCK
 // #define CONFIG_ENABLE_CRC
 
+#define KEY_SIZE 8
+
 #define LATENCY_WINDOWS 1000000
 
 #define STRUCT_OFFSET(type, field) \
@@ -119,9 +121,50 @@ constexpr Key kKeyMin = std::numeric_limits<Key>::min();
 constexpr Key kKeyMax = std::numeric_limits<Key>::max();
 constexpr Value kValueNull = 0;
 
-// Note: our RNICs can read 1KB data in increasing address order (but not for 4KB)
-constexpr uint32_t kInternalPageSize = 1024;
-constexpr uint32_t kLeafPageSize = 1024;
+#if KEY_SIZE == 8
+using InternalKey = Key;
+
+#else
+constexpr size_t arr_cnt = KEY_SIZE / sizeof(uint64_t);
+
+struct KeyArr {
+  uint64_t arr[arr_cnt];
+  KeyArr() { arr[0] = 0; };
+  KeyArr(const uint64_t k) {
+    for (size_t i = 0; i < arr_cnt; ++i) arr[i] = k;
+  };
+
+  KeyArr &operator=(const KeyArr &other) {
+    for (size_t i = 0; i < arr_cnt; ++i) arr[i] = other.arr[i];
+    return *this;
+  }
+
+  operator uint64_t() const { return arr[0]; }
+  bool operator==(const KeyArr &other) const { return arr[0] == other.arr[0]; }
+  bool operator!=(const KeyArr &other) const { return arr[0] != other.arr[0]; }
+
+  bool operator==(const uint64_t &other) const { return arr[0] == other; }
+  bool operator!=(const uint64_t &other) const { return arr[0] != other; }
+
+  auto operator<=>(const uint64_t &other) const { return arr[0] <=> other; }
+
+  auto operator<=>(const KeyArr &other) const {
+    return arr[0] <=> other.arr[0];
+  }
+} __attribute__((packed));
+
+using InternalKey = KeyArr;
+
+#endif
+
+// fixed for variable length key
+constexpr size_t kHeaderRawSize = 26 + 2 * sizeof(InternalKey) + 16;
+constexpr size_t kHeaderSize = (kHeaderRawSize + 63) / 64 * 64;
+constexpr uint32_t kPageSize =
+    (kHeaderSize + 60 * (sizeof(InternalKey) + sizeof(uint64_t)) + 63) / 64 *
+    64;
+constexpr uint32_t kInternalPageSize = kPageSize;
+constexpr uint32_t kLeafPageSize = kPageSize;
 
 __inline__ unsigned long long rdtsc(void) {
   unsigned hi, lo;

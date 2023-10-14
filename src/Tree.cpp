@@ -196,7 +196,7 @@ inline bool Tree::try_lock_addr(GlobalAddress lock_addr, uint64_t *buf,
     uint64_t conflict_tag = 0;
   retry:
     retry_cnt++;
-    if (retry_cnt > 1000000) {
+    if (retry_cnt > 5000000) {
       std::cout << "Deadlock " << lock_addr << std::endl;
 
       std::cout << dsm_client_->get_my_client_id() << ", "
@@ -274,9 +274,11 @@ retry:
   } else {
     ++retry_cnt;
     if (retry_cnt > 5000000) {
-      printf("Deadlock [%u, %lu] my thread %d coro_id %d\n", lock_addr.nodeID,
-             lock_addr.offset, dsm_client_->get_my_thread_id(),
-             ctx ? ctx->coro_id : 0);
+      printf(
+          "Deadlock [%u, %lu] my thread %d coro_id %d try %d lock upgrade "
+          "%d\n",
+          lock_addr.nodeID, lock_addr.offset, dsm_client_->get_my_thread_id(),
+          ctx ? ctx->coro_id : 0, share_lock, upgrade_from_s);
       printf("s [%u, %u] x [%u, %u]\n", s_tic, s_cnt, x_tic, x_cnt);
       fflush(stdout);
       assert(false);
@@ -449,9 +451,11 @@ retry:
   } else {
     ++retry_cnt;
     if (retry_cnt > 5000000) {
-      printf("Deadlock [%u, %lu] my thread %d coro_id %d\n", lock_addr.nodeID,
-             lock_addr.offset, dsm_client_->get_my_thread_id(),
-             ctx ? ctx->coro_id : 0);
+      printf(
+          "Deadlock [%u, %lu] my thread %d coro_id %d try %d lock upgrade "
+          "%d\n",
+          lock_addr.nodeID, lock_addr.offset, dsm_client_->get_my_thread_id(),
+          ctx ? ctx->coro_id : 0, share_lock, upgrade_from_s);
       printf("s [%u, %u] x [%u, %u]\n", s_tic, s_cnt, x_tic, x_cnt);
       fflush(stdout);
       assert(false);
@@ -483,7 +487,7 @@ retry:
     rs[1].dest = read_addr;
     rs[1].size = read_size;
     rs[1].is_on_chip = false;
-    if (retry_cnt > 1000000) {
+    if (retry_cnt > 5000000) {
       printf("Deadlock [%u, %lu] my thread %d coro_id %d\n", lock_addr.nodeID,
              lock_addr.offset, dsm_client_->get_my_thread_id(),
              ctx ? ctx->coro_id : 0);
@@ -518,121 +522,6 @@ retry:
   uint64_t t = timer.end();
   stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t);
 #endif
-}
-
-void Tree::lock_read_read(GlobalAddress lock_addr, bool share_lock,
-                          bool upgrade_from_s, uint64_t *lock_buffer,
-                          GlobalAddress r1_addr, int r1_size, char *r1_buffer,
-                          GlobalAddress r2_addr, int r2_size, char *r2_buffer,
-                          CoroContext *ctx) {
-#ifdef BATCH_LOCK_READ
-
-#ifdef USE_SX_LOCK
-  assert(!upgrade_from_s || !share_lock);
-  uint64_t add_val;
-  if (share_lock) {
-    add_val = ADD_S_LOCK;
-  } else {
-    add_val = upgrade_from_s ? (ADD_X_LOCK | ADD_S_UNLOCK) : ADD_X_LOCK;
-  }
-
-  // Timer timer;
-  // timer.begin();
-
-  dsm_client_->FaaDmBound(lock_addr, 3, add_val, lock_buffer, XS_LOCK_FAA_MASK,
-                          false);
-  dsm_client_->Read(r1_buffer, r1_addr, r1_size, false);
-  dsm_client_->ReadSync(r2_buffer, r2_addr, r2_size, ctx);
-
-  uint16_t s_tic = *lock_buffer & 0xffff;
-  uint16_t s_cnt = (*lock_buffer >> 16) & 0xffff;
-  uint16_t x_tic = (*lock_buffer >> 32) & 0xffff;
-  uint16_t x_cnt = (*lock_buffer >> 48) & 0xffff;
-
-  if (upgrade_from_s) {
-    ++s_cnt;
-  }
-
-  uint64_t retry_cnt = 0;
-retry:
-  if (share_lock && x_cnt == x_tic) {
-    // ok
-  } else if (!share_lock && x_cnt == x_tic && s_cnt == s_tic) {
-    // ok
-  } else {
-    ++retry_cnt;
-    if (retry_cnt > 5000000) {
-      printf("Deadlock [%u, %lu] my thread %d coro_id %d\n", lock_addr.nodeID,
-             lock_addr.offset, dsm_client_->get_my_thread_id(),
-             ctx ? ctx->coro_id : 0);
-      printf("s [%u, %u] x [%u, %u]\n", s_tic, s_cnt, x_tic, x_cnt);
-      fflush(stdout);
-      assert(false);
-      exit(-1);
-    }
-
-    dsm_client_->ReadDm((char *)lock_buffer, lock_addr, 8, false);
-    dsm_client_->Read(r1_buffer, r1_addr, r1_size, false);
-    dsm_client_->ReadSync(r2_buffer, r2_addr, r2_size, ctx);
-
-    s_cnt = (*lock_buffer >> 16) & 0xffff;
-    x_cnt = (*lock_buffer >> 48) & 0xffff;
-    goto retry;
-  }
-  // uint64_t t = timer.end();
-  // stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t);
-
-#else // else not sx lock
-  uint64_t retry_cnt = 0;
-  uint64_t pre_tag = 0;
-  uint64_t conflict_tag = 0;
-  uint64_t tag = dsm_client_->get_thread_tag();
-
-  // Timer timer;
-  // timer.begin();
-
-retry:
-  if (retry_cnt > 1000000) {
-    printf("Deadlock [%u, %lu] my thread %d coro_id %d locked by %ld,%ld\n",
-           lock_addr.nodeID, lock_addr.offset, dsm_client_->get_my_thread_id(),
-           ctx ? ctx->coro_id : 0, conflict_tag >> 32,
-           conflict_tag << 32 >> 32);
-    assert(false);
-    exit(-1);
-  }
-
-  dsm_client_->CasDm(lock_addr, 0, tag, lock_buffer, false);
-  dsm_client_->Read(r1_buffer, r1_addr, r1_size, false);
-  dsm_client_->ReadSync(r2_buffer, r2_addr, r2_size, ctx);
-
-  bool res = *(lock_buffer) == 0;
-  if (!res) {
-    conflict_tag = *lock_buffer;
-    if (conflict_tag != pre_tag) {
-      retry_cnt = 0;
-      pre_tag = conflict_tag;
-    }
-    goto retry;
-  }
-
-  // uint64_t t = timer.end();
-  // stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t);
-  
-#endif  // USE_SX_LOCK
-
-#else // else not batch lock read
-  // Timer timer;
-  // timer.begin();
-  acquire_lock(lock_addr, lock_buffer, ctx, share_lock, upgrade_from_s);
-  // uint64_t t_lock = timer.end();
-  // stat_helper.add(dsm_client_->get_my_thread_id(), lat_lock, t_lock);
-
-  // timer.begin();
-  dsm_client_->ReadSync(r1_buffer, r1_addr, r1_size, ctx);
-  dsm_client_->ReadSync(r2_buffer, r2_addr, r2_size, ctx);
-  // uint64_t t_read = timer.end();
-  // stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t_read);
-#endif  // BATCH_LOCK_READ
 }
 
 void Tree::lock_bench(const Key &k, CoroContext *ctx, int coro_id) {
@@ -1288,10 +1177,7 @@ re_read:
 
     // Timer timer;
     // timer.begin();
-    bool s = internal_page_slice_search(guard, internal_read_cnt, k, result);
-    if (!s) {
-      goto re_read;
-    }
+    internal_page_slice_search(guard, internal_read_cnt, k, result);
     assert(result.sibling != GlobalAddress::Null() ||
            result.next_level != GlobalAddress::Null());
     if (result.level == 1 && enable_cache) {
@@ -1357,7 +1243,7 @@ next:
 #endif
 }
 
-inline bool Tree::internal_page_slice_search(InternalEntry *entries, int cnt,
+inline void Tree::internal_page_slice_search(InternalEntry *entries, int cnt,
                                              const Key k,
                                              SearchResult &result) {
   // find next_min: maxium <= k; next_max: minium > k
@@ -1384,8 +1270,6 @@ inline bool Tree::internal_page_slice_search(InternalEntry *entries, int cnt,
     result.next_min = entries[min_idx].key;
     result.next_max = entries[max_idx].key;
   }
-
-  return true;
 }
 
 void Tree::internal_page_update(GlobalAddress page_addr, const Key &k,
@@ -1573,20 +1457,48 @@ void Tree::internal_page_store_update_left_child(GlobalAddress page_addr,
       }
       uint64_t *cas_ret_buffer = rbuf.get_cas_buffer();
       // lock-based, must cas succeed
+#if KEY_SIZE == 8
       dsm_client_->CasMask(GADD(page_addr, ((char *)insert_addr - page_buffer)),
                            4, (uint64_t)old_buffer, (uint64_t)insert_addr,
                            cas_ret_buffer, (uint64_t)mask_buffer, false);
+#else
+      dsm_client_->Write(
+          (char *)&insert_addr->key,
+          GADD(page_addr, (char *)&insert_addr->key - page_buffer),
+          sizeof(InternalKey), false);
+      InternalEntry *old_entry = (InternalEntry *)old_buffer;
+      dsm_client_->Cas(GADD(page_addr, (char *)&insert_addr->ptr - page_buffer),
+                       old_entry->ptr.raw, insert_addr->ptr.raw, cas_ret_buffer,
+                       false);
+#endif
       insert_addr = page->records + last_idx;  // update insert_addr
     }
 
+    uint64_t *cas_ret_buffer = rbuf.get_cas_buffer();
+#if KEY_SIZE == 8
     uint64_t *old_buffer = rbuf.get_cas_buffer();
     memcpy(old_buffer, insert_addr, sizeof(InternalEntry));
     insert_addr->key = k;
     insert_addr->ptr = v;
-    uint64_t *cas_ret_buffer = rbuf.get_cas_buffer();
     dsm_client_->CasMask(GADD(page_addr, ((char *)insert_addr - page_buffer)),
                          4, (uint64_t)old_buffer, (uint64_t)insert_addr,
                          cas_ret_buffer, (uint64_t)mask_buffer, false);
+#else
+    insert_addr->key = k;
+    insert_addr->ptr = GlobalAddress::Null();
+    dsm_client_->Write((char *)insert_addr,
+                       GADD(page_addr, ((char *)insert_addr - page_buffer)),
+                       sizeof(InternalEntry), false);
+    GlobalAddress new_ptr;
+    new_ptr.raw = insert_addr->ptr.raw;
+    new_ptr = v;
+    // bool cas_ok = dsm_client_->CasSync(
+    //     GADD(page_addr, (char *)&insert_addr->ptr - page_buffer),
+    //     insert_addr->ptr.raw, new_ptr.raw, cas_ret_buffer, ctx);
+    // assert(cas_ok);
+    dsm_client_->Cas(GADD(page_addr, (char *)&insert_addr->ptr - page_buffer),
+                     insert_addr->ptr.raw, new_ptr.raw, cas_ret_buffer, false);
+#endif
 
     if (left_update_addr) {
       uint64_t *cas_ret_buffer = rbuf.get_cas_buffer();
@@ -1707,6 +1619,7 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   int group_offset =
       offsetof(LeafPage, groups) + sizeof(LeafEntryGroup) * group_id;
   LeafEntryGroup *group = (LeafEntryGroup *)(page_buffer + group_offset);
+  bool hold_x_lock = false;
   // try upsert hash group
 #ifdef FINE_GRAINED_LEAF_NODE
   // 1. lock, read, and check consistency
@@ -1715,6 +1628,7 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   lock_and_read(lock_addr, share_lock, false, lock_buffer,
                 GADD(page_addr, bucket_offset), kReadBucketSize,
                 page_buffer + bucket_offset, ctx);
+  hold_x_lock = !share_lock;
 
   uint8_t actual_version;
   if (!group->check_consistency(!(bucket_id % 2), page_addr.node_version,
@@ -1744,12 +1658,13 @@ retry_insert:
   group->find(k, !(bucket_id % 2), &update_addr, &insert_addr);
   if (update_addr) {
     LeafValue cas_val(update_addr->lv.cl_ver, v);
-    cas_and_unlock(GADD(page_addr, ((char *)(&update_addr->lv) - page_buffer)),
+    cas_and_unlock(GADD(page_addr, ((char *)&update_addr->lv - page_buffer)),
                    3, cas_ret_buffer, update_addr->lv.raw, cas_val.raw, ~0ull,
                    lock_addr, lock_buffer, share_lock, ctx, false);
     return true;
   } else if (insert_addr) {
     // 3. try insert via CAS
+#if KEY_SIZE == 8
     uint64_t *swap_buffer = rbuf.get_cas_buffer();
     LeafEntry *swap_entry = (LeafEntry *)swap_buffer;
     swap_entry->key = k;
@@ -1770,6 +1685,26 @@ retry_insert:
     // big-endian for 16-byte CAS
     insert_addr->key = __bswap_64(cas_ret_buffer[0]);
     insert_addr->lv.raw = __bswap_64(cas_ret_buffer[1]);
+#else
+    LeafValue cas_val(insert_addr->lv.cl_ver, -1);
+    bool cas_ok = dsm_client_->CasSync(
+        GADD(page_addr, ((char *)&insert_addr->lv - page_buffer)),
+        insert_addr->lv.raw, cas_val.raw, cas_ret_buffer, ctx);
+    if (cas_ok) {
+      insert_addr->key = k;
+      insert_addr->lv.val = -1;
+      dsm_client_->Write(
+          (char *)&insert_addr->key,
+          GADD(page_addr, (char *)&insert_addr->key - page_buffer),
+          sizeof(InternalKey), false);
+      cas_val.val = v;
+      cas_and_unlock(GADD(page_addr, ((char *)&insert_addr->lv - page_buffer)),
+                     3, cas_ret_buffer, insert_addr->lv.raw, cas_val.raw, ~0ull,
+                     lock_addr, lock_buffer, share_lock, ctx, false);
+      return true;
+    }
+    insert_addr->lv.raw = cas_ret_buffer[0];
+#endif
     if (++retry_cnt > 10) {
       printf("retry insert %d times\n", retry_cnt);
       assert(false);
@@ -1782,21 +1717,21 @@ retry_insert:
   // upgrade to x lock
   upgrade_from_s = share_lock;
   share_lock = false;
-#else
-  // already hold lock
-  dsm_client_->ReadSync(page_buffer, page_addr, kLeafPageSize, ctx);
 #endif
 
 #endif  // FINE_GRAINED_LEAF_NODE
 
-#if defined(USE_SX_LOCK) || !defined(FINE_GRAINED_LEAF_NODE)
 #ifdef USE_SX_LOCK
 retry_with_xlock:
 #endif
-  // not holding lock, or only share lock
-  lock_and_read(lock_addr, share_lock, upgrade_from_s, lock_buffer, page_addr,
-                kLeafPageSize, page_buffer, ctx);
-#endif
+  if (hold_x_lock) {
+    dsm_client_->ReadSync(page_buffer, page_addr, kLeafPageSize, ctx);
+  } else {
+    // not holding lock, or only share lock
+    lock_and_read(lock_addr, share_lock, upgrade_from_s, lock_buffer, page_addr,
+                  kLeafPageSize, page_buffer, ctx);
+    hold_x_lock = !share_lock;
+  }
   LeafPage *page = (LeafPage *)page_buffer;
 
   assert(header->level == level);
@@ -1836,6 +1771,7 @@ retry_insert_2:
                    lock_addr, lock_buffer, share_lock, ctx, false);
     return true;
   } else if (insert_addr) {
+#if KEY_SIZE == 8
     uint64_t *swap_buffer = rbuf.get_cas_buffer();
     LeafEntry *swap_entry = (LeafEntry *)swap_buffer;
     swap_entry->key = k;
@@ -1854,6 +1790,26 @@ retry_insert_2:
     }
     insert_addr->key = __bswap_64(cas_ret_buffer[0]);
     insert_addr->lv.raw = __bswap_64(cas_ret_buffer[1]);
+#else
+    LeafValue cas_val(insert_addr->lv.cl_ver, -1);
+    bool cas_ok = dsm_client_->CasSync(
+        GADD(page_addr, ((char *)&insert_addr->lv - page_buffer)),
+        insert_addr->lv.raw, cas_val.raw, cas_ret_buffer, ctx);
+    if (cas_ok) {
+      insert_addr->key = k;
+      insert_addr->lv.val = -1;
+      dsm_client_->Write(
+          (char *)&insert_addr->key,
+          GADD(page_addr, (char *)&insert_addr->key - page_buffer),
+          sizeof(InternalKey), false);
+      cas_val.val = v;
+      cas_and_unlock(GADD(page_addr, ((char *)&insert_addr->lv - page_buffer)),
+                     3, cas_ret_buffer, insert_addr->lv.raw, cas_val.raw, ~0ull,
+                     lock_addr, lock_buffer, share_lock, ctx, false);
+      return true;
+    }
+    insert_addr->lv.raw = cas_ret_buffer[0];
+#endif
     goto retry_insert_2;
   }
 

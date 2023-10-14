@@ -79,23 +79,23 @@ struct SearchResult {
 constexpr int kMaxInternalGroup = 4;
 
 struct alignas(64) Header {
-  uint8_t padding[6];
+  uint8_t padding[kHeaderSize - kHeaderRawSize];
   // int8_t cnt = 0;
   uint8_t version : 4;
   uint8_t read_gran : 4;
   uint8_t level : 7;
-  uint8_t is_root : 1;
+  uint8_t is_root : 1;  
   uint8_t cache_read_gran[kMaxInternalGroup];  // used in cache
   uint8_t grp_in_cache[kMaxInternalGroup];     // used in cache
   uint64_t index_cache_freq;
   GlobalAddress my_addr = GlobalAddress::Null();
 
   GlobalAddress sibling_ptr = GlobalAddress::Null();
-  Key highest = kKeyMax;
+  InternalKey highest = kKeyMax;
 
   // align as a value-key pair
   GlobalAddress leftmost_ptr = GlobalAddress::Null();
-  Key lowest = kKeyMin;
+  InternalKey lowest = kKeyMin;
 
   Header()
       : version(0),
@@ -105,24 +105,27 @@ struct alignas(64) Header {
         index_cache_freq(0) {}
 
   void debug() const {
-    std::cout << "leftmost=" << leftmost_ptr << ", "
-              << "sibling=" << sibling_ptr << ", "
-              << "level=" << (int)level
-              << ","
-              // << "cnt=" << cnt << ","
-              << "range=[" << lowest << " - " << highest << "]";
+    // std::cout << "leftmost=" << leftmost_ptr << ", "
+    //           << "sibling=" << sibling_ptr << ", "
+    //           << "level=" << (int)level
+    //           << ","
+    //           // << "cnt=" << cnt << ","
+    //           << "range=[" << lowest << " - " << highest << "]";
   }
 };
+#if KEY_SIZE == 8
 static_assert(sizeof(Header) == 64);
+#endif
 
 struct InternalEntry {
   GlobalAddress ptr;
-  Key key = 0;
+  InternalKey key = 0;
 
   bool operator<(const InternalEntry &rhs) const { return key < rhs.key; }
 };
 
-constexpr size_t kEntryPerCacheLine = 64 / sizeof(InternalEntry);
+constexpr size_t kEntryPerCacheLine =
+    sizeof(InternalEntry) <= 64 ? 64 / sizeof(InternalEntry) : 1;
 
 struct __attribute__((packed)) LeafValue {
   union {
@@ -144,14 +147,14 @@ struct __attribute__((packed)) LeafValue {
 struct __attribute__((packed)) LeafEntry {
   // uint8_t f_version : 4;
   LeafValue lv;
-  Key key = 0;
+  InternalKey key = 0;
   // uint8_t r_version : 4;
 };
 
 // used for sort
 struct LeafKVEntry {
   Value val = 0;
-  Key key = 0;
+  InternalKey key = 0;
 
   LeafKVEntry &operator=(const LeafEntry &rhs) {
     val = rhs.lv.val;
@@ -161,8 +164,7 @@ struct LeafKVEntry {
   bool operator<(const LeafKVEntry &rhs) const { return key < rhs.key; }
 };
 
-constexpr int kInternalCardinality =
-    (kInternalPageSize - sizeof(Header)) / sizeof(InternalEntry);
+constexpr int kInternalCardinality = 60;
 constexpr int kGroupCardinality = kInternalCardinality / kMaxInternalGroup;
 
 static inline double get_quarter(Key min, Key max) { return (max - min) / 4.0; }
@@ -208,8 +210,8 @@ class InternalPage {
                uint32_t level = 0) {
     hdr.leftmost_ptr = left;
     hdr.level = level;
-    records[0].key = key;
-    records[0].ptr = right;
+    records[kInternalCardinality - 1].key = key;
+    records[kInternalCardinality - 1].ptr = right;
     // records[1].ptr = GlobalAddress::Null();
     // hdr.cnt = 1;
   }
@@ -241,8 +243,10 @@ class InternalPage {
            start <= (char *)(records + kInternalCardinality));
     assert(end >= (char *)records &&
            end <= (char *)(records + kInternalCardinality));
-    int start_idx = (start - (char *)records) / sizeof(InternalEntry);
-    int end_idx = (end - (char *)records) / sizeof(InternalEntry);
+    int start_idx = start >= (char *)records
+                        ? ((start - (char *)records) / sizeof(InternalEntry))
+                        : 0;
+    int end_idx = (end - (char *)records) / (int)(sizeof(InternalEntry));
     int start_cache_idx = (start_idx + kEntryPerCacheLine - 1) /
                           kEntryPerCacheLine * kEntryPerCacheLine;
     for (int i = start_cache_idx; i < end_idx; i += kEntryPerCacheLine) {
@@ -301,7 +305,7 @@ class InternalPage {
     for (int i = 0; i < 3; i++) {
       double cur_max = min + (i + 1) * quarter;
       group_cnt[i] = 0;
-      while (p < end && p->key < cur_max) {
+      while (p < end && (uint64_t)p->key < cur_max) {
         ++group_cnt[i];
         ++p;
       }
@@ -360,7 +364,7 @@ class InternalPage {
   void verbose_debug() const {
     this->debug();
     for (int i = 0; i < kInternalCardinality; ++i) {
-      printf("[%lu %lu] ", this->records[i].key, this->records[i].ptr.raw);
+      printf("[%lu %lu] ", (uint64_t)records[i].key, records[i].ptr.raw);
     }
     printf("\n");
   }
@@ -618,11 +622,6 @@ class Tree {
                      bool upgrade_from_s, uint64_t *lock_buffer,
                      GlobalAddress read_addr, int read_size, char *read_buffer,
                      CoroContext *ctx);
-  void lock_read_read(GlobalAddress lock_addr, bool share_lock,
-                      bool upgrade_from_s, uint64_t *lock_buffer,
-                      GlobalAddress r1_addr, int r1_size, char *r1_buffer,
-                      GlobalAddress r2_addr, int r2_size, char *r2_buffer,
-                      CoroContext *ctx);
 
   bool leaf_page_group_search(GlobalAddress page_addr, const Key &k,
                               SearchResult &result, CoroContext *ctx,
@@ -630,7 +629,7 @@ class Tree {
   bool page_search(GlobalAddress page_addr, int level_hint, int read_gran,
                    Key min, Key max, const Key &k, SearchResult &result,
                    CoroContext *ctx, bool from_cache = false);
-  bool internal_page_slice_search(InternalEntry *entries, int cnt, const Key k,
+  void internal_page_slice_search(InternalEntry *entries, int cnt, const Key k,
                                   SearchResult &result);
 
   void update_ptr_internal(const Key &k, GlobalAddress v, CoroContext *ctx,
