@@ -158,7 +158,7 @@ using InternalKey = KeyArr;
 #endif
 
 // fixed for variable length key
-constexpr size_t kHeaderRawSize = 26 + 2 * sizeof(InternalKey) + 16;
+constexpr size_t kHeaderRawSize = 30 + 2 * sizeof(InternalKey) + 16;
 constexpr size_t kHeaderSize = (kHeaderRawSize + 63) / 64 * 64;
 constexpr uint32_t kPageSize =
     (kHeaderSize + 60 * (sizeof(InternalKey) + sizeof(uint64_t)) + 63) / 64 *

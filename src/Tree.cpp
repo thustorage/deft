@@ -15,6 +15,7 @@
 #define FINE_GRAINED_LEAF_NODE
 #define FINE_GRAINED_INTERNAL_NODE
 #define BATCH_LOCK_READ
+// #define USE_CRC
 
 uint64_t cache_miss[MAX_APP_THREAD][8];
 uint64_t cache_hit[MAX_APP_THREAD][8];
@@ -1065,6 +1066,21 @@ re_read:
         get_root_ptr(ctx, true);
       }
     }
+#ifdef USE_CRC
+  Timer t_crc;
+  t_crc.begin();
+  uint32_t c;
+  if (result.is_leaf) {
+    LeafPage *p = (LeafPage *)page_buffer;
+    c = p->check_crc();
+  } else {
+    InternalPage *p = (InternalPage *)page_buffer;
+    c = p->check_crc();
+  }
+  uint64_t t = t_crc.end();
+  stat_helper.add(dsm_client_->get_my_thread_id(), lat_crc, t);
+  stat_helper.add(dsm_client_->get_my_thread_id(), lat_cache_search, c);
+#endif
   } else {
     group_id = get_key_group(k, min, max);
     // read one more entry
@@ -1399,6 +1415,19 @@ void Tree::internal_page_store_update_left_child(GlobalAddress page_addr,
   InternalEntry *left_update_addr = nullptr;
   InternalEntry *insert_addr = nullptr;
 
+  if (left_child_val != GlobalAddress::Null()) {
+    // find left_child
+    if (left_child == page->hdr.lowest) {
+      assert(page->hdr.leftmost_ptr == left_child_val);
+      left_update_addr = (InternalEntry *)&page->hdr.leftmost_ptr;
+    } else {
+      int left_idx = page->find_records_not_null(left_child);
+      if (left_idx != -1) {
+        assert(page->records[left_idx].ptr == left_child_val);
+        left_update_addr = &page->records[left_idx];
+      }
+    }
+  }
   int new_gran = cur_gran;
   for (; new_gran >= gran_full; --new_gran) {
     // update k, not found key, can't be the last one of previous group
@@ -1411,20 +1440,6 @@ void Tree::internal_page_store_update_left_child(GlobalAddress page_addr,
     } else {
       begin_idx = 0;
       max_cnt = kInternalCardinality;
-    }
-
-    if (new_gran == cur_gran && left_child_val != GlobalAddress::Null()) {
-      // find left_child
-      if (left_child == page->hdr.lowest) {
-        assert(page->hdr.leftmost_ptr == left_child_val);
-        left_update_addr = (InternalEntry *)&page->hdr.leftmost_ptr;
-      } else {
-        int left_idx = page->find_records_not_null(left_child);
-        if (left_idx != -1) {
-          assert(page->records[left_idx].ptr == left_child_val);
-          left_update_addr = &page->records[left_idx];
-        }
-      }
     }
 
     int empty_idx = page->find_empty(begin_idx, max_cnt);
@@ -1766,9 +1781,20 @@ retry_insert_2:
 
   if (update_addr) {
     LeafValue cas_val(update_addr->lv.cl_ver, v);
+#ifdef USE_CRC
+    Timer t_crc;
+    t_crc.begin();
+    uint32_t c = page->set_crc();
+    uint64_t t = t_crc.end();
+    stat_helper.add(dsm_client_->get_my_thread_id(), lat_crc, t);
+    stat_helper.add(dsm_client_->get_my_thread_id(), lat_cache_search, c);
+    write_and_unlock(page_buffer, page_addr, kLeafPageSize, lock_buffer,
+                     lock_addr, ctx, false, share_lock);
+#else
     cas_and_unlock(GADD(page_addr, ((char *)&(update_addr->lv) - page_buffer)),
                    3, cas_ret_buffer, update_addr->lv.raw, cas_val.raw, ~0ull,
                    lock_addr, lock_buffer, share_lock, ctx, false);
+#endif
     return true;
   } else if (insert_addr) {
 #if KEY_SIZE == 8

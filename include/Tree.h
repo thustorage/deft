@@ -8,11 +8,18 @@
 #include <city.h>
 #include <functional>
 #include <iostream>
+#include <boost/crc.hpp>
 
 class IndexCache;
 extern uint64_t cache_miss[MAX_APP_THREAD][8];
 extern uint64_t cache_hit[MAX_APP_THREAD][8];
 extern uint64_t latency[MAX_APP_THREAD][LATENCY_WINDOWS];
+
+static inline uint32_t crc32(const char *buf, size_t len) {
+  boost::crc_32_type result;
+  result.process_bytes(buf, len);
+  return result.checksum();
+}
 
 enum latency_enum {
   lat_lock,
@@ -21,6 +28,7 @@ enum latency_enum {
   lat_internal_search,
   lat_cache_search,
   lat_op,
+  lat_crc,
   lat_end
 };
 
@@ -79,6 +87,7 @@ struct SearchResult {
 constexpr int kMaxInternalGroup = 4;
 
 struct alignas(64) Header {
+  uint32_t crc;
   uint8_t padding[kHeaderSize - kHeaderRawSize];
   // int8_t cnt = 0;
   uint8_t version : 4;
@@ -219,6 +228,15 @@ class InternalPage {
   InternalPage(uint32_t level = 0) {
     hdr.level = level;
     // records[0].ptr = GlobalAddress::Null();
+  }
+
+  uint32_t set_crc() {
+    hdr.crc = crc32((char *)&hdr.crc + 4, kLeafPageSize - 4);
+    return hdr.crc;
+  }
+  uint32_t check_crc() {
+    uint32_t crc = crc32((char *)&hdr.crc + 4, kLeafPageSize - 4);
+    return crc;
   }
 
   uint8_t update_version() {
@@ -526,6 +544,14 @@ class LeafPage {
     // records[0].value = kValueNull;
   }
 
+  uint32_t set_crc() {
+    hdr.crc = crc32((char *)&hdr.crc + 4, kLeafPageSize - 4);
+    return hdr.crc;
+  }
+  uint32_t check_crc() {
+    uint32_t crc = crc32((char *)&hdr.crc + 4, kLeafPageSize - 4);
+    return crc;
+  }
   uint8_t update_version() {
     hdr.version += 1;
     for (int i = 0; i < kNumGroup; ++i) {
