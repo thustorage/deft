@@ -5,7 +5,6 @@ source ../script/global_config.sh
 NUMA_AFFINITY=0
 APP_NAME=client
 
-# num_servers=$2
 num_clients=$4
 num_threads=$6
 

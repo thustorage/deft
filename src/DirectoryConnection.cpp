@@ -4,9 +4,10 @@
 
 DirectoryConnection::DirectoryConnection(uint16_t dirID, void *dsmPool,
                                          uint64_t dsmSize, uint32_t num_client,
+                                         uint16_t rnic_id,
                                          RemoteConnectionToClient *remote_con)
     : dirID(dirID), remote_con_(remote_con) {
-  createContext(&ctx);
+  createContext(&ctx, rnic_id);
   cq = ibv_create_cq(ctx.ctx, RAW_RECV_CQ_COUNT, NULL, NULL, 0);
   message = new RawMessageConnection(ctx, cq, DIR_MESSAGE_NR);
 

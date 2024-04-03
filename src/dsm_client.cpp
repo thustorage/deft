@@ -21,7 +21,7 @@ void DSMClient::InitRdmaConnection() {
     // client thread to servers
     th_con_[i] =
         new ThreadConnection(i, (void *)cache_.data, cache_.size * define::GB,
-                             conf_.num_server, conn_to_server_);
+                             conf_.num_server, conf_.rnic_id, conn_to_server_);
   }
 
   keeper_ = new DSMClientKeeper(th_con_, conn_to_server_, conf_.num_server);
@@ -45,7 +45,7 @@ void DSMClient::RegisterThread() {
     has_init[thread_id_] = true;
   }
 
-  rdma_buffer_ = (char *)cache_.data + thread_id_ * 12 * define::MB;
+  rdma_buffer_ = (char *)cache_.data + thread_id_ * define::kPerThreadRdmaBuf;
 
   for (int i = 0; i < define::kMaxCoro; ++i) {
     rbuf_[i].set_buffer(rdma_buffer_ + i * define::kPerCoroRdmaBuf);

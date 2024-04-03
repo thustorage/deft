@@ -30,7 +30,8 @@ struct DirectoryConnection {
   RemoteConnectionToClient *remote_con_;
 
   DirectoryConnection(uint16_t dirID, void *dsmPool, uint64_t dsmSize,
-                      uint32_t machineNR, RemoteConnectionToClient *remote_con);
+                      uint32_t machineNR, uint16_t rnic_id,
+                      RemoteConnectionToClient *remote_con);
 
   void sendMessage2App(RawMessage *m, uint16_t node_id, uint16_t th_id);
 };

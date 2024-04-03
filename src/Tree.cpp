@@ -12,10 +12,15 @@
 #include "Timer.h"
 
 #define USE_SX_LOCK
+#define BATCH_LOCK_READ
 #define FINE_GRAINED_LEAF_NODE
 #define FINE_GRAINED_INTERNAL_NODE
-#define BATCH_LOCK_READ
 // #define USE_CRC
+// #define USE_LOCAL_LOCK
+
+#if defined(USE_SX_LOCK) && defined(USE_LOCAL_LOCK)
+#error "local lock only for normal lock"
+#endif
 
 uint64_t cache_miss[MAX_APP_THREAD][8];
 uint64_t cache_hit[MAX_APP_THREAD][8];
@@ -41,7 +46,9 @@ constexpr uint64_t ADD_S_UNLOCK = 1ul << 16;
 constexpr uint64_t ADD_X_LOCK = 1ul << 32;
 constexpr uint64_t ADD_X_UNLOCK = 1ul << 48;
 
-// thread_local std::queue<uint16_t> hot_wait_queue;
+#ifdef USE_LOCAL_LOCK
+thread_local std::queue<uint16_t> hot_wait_queue;
+#endif
 
 Tree::Tree(DSMClient *dsm_client, uint16_t tree_id)
     : dsm_client_(dsm_client), tree_id(tree_id) {
@@ -186,10 +193,12 @@ bool Tree::update_new_root(GlobalAddress left, const Key &k,
 }
 inline bool Tree::try_lock_addr(GlobalAddress lock_addr, uint64_t *buf,
                                 CoroContext *ctx) {
-  // bool hand_over = acquire_local_lock(lock_addr, ctx, coro_id);
-  // if (hand_over) {
-  //   return true;
-  // }
+#ifdef USE_LOCAL_LOCK
+  bool hand_over = acquire_local_lock(lock_addr, ctx, ctx ? ctx->coro_id : 0);
+  if (hand_over) {
+    return true;
+  }
+#endif
 
   {
     uint64_t retry_cnt = 0;
@@ -226,11 +235,13 @@ inline bool Tree::try_lock_addr(GlobalAddress lock_addr, uint64_t *buf,
 
 inline void Tree::unlock_addr(GlobalAddress lock_addr, uint64_t *buf,
                               CoroContext *ctx, bool async) {
-  // bool hand_over_other = can_hand_over(lock_addr);
-  // if (hand_over_other) {
-  //   releases_local_lock(lock_addr);
-  //   return;
-  // }
+#ifdef USE_LOCAL_LOCK
+  bool hand_over_other = can_hand_over(lock_addr);
+  if (hand_over_other) {
+    releases_local_lock(lock_addr);
+    return;
+  }
+#endif
 
   *buf = 0;
   if (async) {
@@ -239,7 +250,9 @@ inline void Tree::unlock_addr(GlobalAddress lock_addr, uint64_t *buf,
     dsm_client_->WriteDmSync((char *)buf, lock_addr, sizeof(uint64_t), ctx);
   }
 
-  // releases_local_lock(lock_addr);
+#ifdef USE_LOCAL_LOCK
+  releases_local_lock(lock_addr);
+#endif
 }
 
 inline void Tree::acquire_sx_lock(GlobalAddress lock_addr,
@@ -329,6 +342,15 @@ inline void Tree::release_lock(GlobalAddress lock_addr, uint64_t *lock_buffer,
                                 XS_LOCK_FAA_MASK, ctx);
   }
 #else
+
+#ifdef USE_LOCAL_LOCK
+  bool hand_over_other = can_hand_over(lock_addr);
+  if (hand_over_other) {
+    releases_local_lock(lock_addr);
+    return;
+  }
+#endif
+
   *lock_buffer = 0;
   if (async) {
     dsm_client_->WriteDm((char *)lock_buffer, lock_addr, sizeof(uint64_t),
@@ -337,6 +359,11 @@ inline void Tree::release_lock(GlobalAddress lock_addr, uint64_t *lock_buffer,
     dsm_client_->WriteDmSync((char *)lock_buffer, lock_addr, sizeof(uint64_t),
                              ctx);
   }
+
+#ifdef USE_LOCAL_LOCK
+  releases_local_lock(lock_addr);
+#endif
+
 #endif
 }
 
@@ -347,17 +374,21 @@ void Tree::write_and_unlock(char *write_buffer, GlobalAddress write_addr,
   Timer timer;
   timer.begin();
 
-  // bool hand_over_other = can_hand_over(lock_addr);
-  // if (hand_over_other) {
-  //   dsm_client_->WriteSync(write_buffer, write_addr, write_size, ctx);
-  //   // releases_local_lock(lock_addr);
-  //   return;
-  // }
 
 #ifdef USE_SX_LOCK
   dsm_client_->Write(write_buffer, write_addr, write_size, false);
   release_sx_lock(lock_addr, cas_buffer, ctx, async, sx_lock);
 #else
+
+#ifdef USE_LOCAL_LOCK
+  bool hand_over_other = can_hand_over(lock_addr);
+  if (hand_over_other) {
+    dsm_client_->WriteSync(write_buffer, write_addr, write_size, ctx);
+    releases_local_lock(lock_addr);
+    return;
+  }
+#endif
+
   RdmaOpRegion rs[2];
   rs[0].source = (uint64_t)write_buffer;
   rs[0].dest = write_addr;
@@ -375,8 +406,12 @@ void Tree::write_and_unlock(char *write_buffer, GlobalAddress write_addr,
   } else {
     dsm_client_->WriteBatchSync(rs, 2, ctx);
   }
+
+#ifdef USE_LOCAL_LOCK
+  releases_local_lock(lock_addr);
 #endif
-  // releases_local_lock(lock_addr);
+
+#endif
   auto t = timer.end();
   stat_helper.add(dsm_client_->get_my_thread_id(), lat_write_page, t);
 }
@@ -390,10 +425,21 @@ void Tree::cas_and_unlock(GlobalAddress cas_addr, int log_cas_size,
   timer.begin();
 
 #ifdef USE_SX_LOCK
-  dsm_client_->CasMask(cas_addr, log_cas_size, equal, swap, cas_buffer, ~(0ull),
+  dsm_client_->CasMask(cas_addr, log_cas_size, equal, swap, cas_buffer, mask,
                        false);
   release_sx_lock(lock_addr, lock_buffer, ctx, async, share_lock);
 #else  // not USE_SX_LOCK
+
+#ifdef USE_LOCAL_LOCK
+  bool hand_over_other = can_hand_over(lock_addr);
+  if (hand_over_other) {
+    dsm_client_->CasMaskSync(cas_addr, log_cas_size, equal, swap, cas_buffer,
+                             mask, ctx);
+    releases_local_lock(lock_addr);
+    return;
+  }
+#endif
+
   RdmaOpRegion rs[2];
   rs[0].source = (uint64_t)cas_buffer;
   rs[0].dest = cas_addr;
@@ -410,6 +456,10 @@ void Tree::cas_and_unlock(GlobalAddress cas_addr, int log_cas_size,
   } else {
     dsm_client_->CasMaskWriteSync(rs[0], equal, swap, mask, rs[1], ctx);
   }
+#endif
+
+#ifdef USE_LOCAL_LOCK
+  releases_local_lock(lock_addr);
 #endif
 
   uint64_t t = timer.end();
@@ -651,6 +701,7 @@ void Tree::insert(const Key &k, const Value &v, CoroContext *ctx) {
 
   GlobalAddress p = root;
   int level_hint = -1;
+  int cnt = 0;
 
 next:
   if (!page_search(p, level_hint, p.read_gran, min, max, k, result, ctx)) {
@@ -682,18 +733,27 @@ next:
   }
 
   bool res = false;
-  int cnt = 0;
-  while (!res) {
+  
+  // while (!res) {
+
+#ifdef USE_SX_LOCK
+  res = leaf_page_store(p, k, v, root, 0, ctx, false, true);
+#else
+  res = leaf_page_store(p, k, v, root, 0, ctx, false);
+#endif
+  if (!res) {
+    // retry
+    p = get_root_ptr(ctx);
+    level_hint = -1;
+    min = kKeyMin;
+    max = kKeyMax;
+    goto next;
+    ++cnt;
     if (cnt > 1) {
       printf("retry insert <k:%lu v:%lu> %d\n", k, v, cnt);
     }
-#ifdef USE_SX_LOCK
-    res = leaf_page_store(p, k, v, root, 0, ctx, false, true);
-#else
-    res = leaf_page_store(p, k, v, root, 0, ctx, false);
-#endif
-    ++cnt;
   }
+  // }
 }
 
 bool Tree::search(const Key &k, Value &v, CoroContext *ctx, int coro_id) {
@@ -1751,21 +1811,22 @@ retry_with_xlock:
 
   assert(header->level == level);
 
-  if (from_cache &&
-      (k < header->lowest || k >= header->highest ||
-       page_addr.node_version != header->version)) {  // cache is stale
+  if (k < header->lowest || k >= header->highest ||
+      page_addr.node_version != header->version) {  // cache is stale
+    // Note: when very slow, may need recurse very large times and cause stack
+    // overflow
     release_lock(lock_addr, lock_buffer, ctx, true, share_lock);
     return false;
   }
 
-  if (k >= header->highest) {
-    // note that retry may also get here
-    assert(header->sibling_ptr != GlobalAddress::Null());
-    release_lock(lock_addr, lock_buffer, ctx, true, share_lock);
-    leaf_page_store(header->sibling_ptr, k, v, root, level, ctx, from_cache,
-                    share_lock);
-    return true;
-  }
+  // if (k >= header->highest) {
+  //   // note that retry may also get here
+  //   assert(header->sibling_ptr != GlobalAddress::Null());
+  //   release_lock(lock_addr, lock_buffer, ctx, true, share_lock);
+  //   leaf_page_store(header->sibling_ptr, k, v, root, level, ctx, from_cache,
+  //                   share_lock);
+  //   return true;
+  // }
   assert(k >= header->lowest);
 
   if (header->version != page_addr.node_version) {
@@ -1789,11 +1850,11 @@ retry_insert_2:
     stat_helper.add(dsm_client_->get_my_thread_id(), lat_crc, t);
     stat_helper.add(dsm_client_->get_my_thread_id(), lat_cache_search, c);
     write_and_unlock(page_buffer, page_addr, kLeafPageSize, lock_buffer,
-                     lock_addr, ctx, false, share_lock);
+                     lock_addr, ctx, true, share_lock);
 #else
     cas_and_unlock(GADD(page_addr, ((char *)&(update_addr->lv) - page_buffer)),
                    3, cas_ret_buffer, update_addr->lv.raw, cas_val.raw, ~0ull,
-                   lock_addr, lock_buffer, share_lock, ctx, false);
+                   lock_addr, lock_buffer, share_lock, ctx, true);
 #endif
     return true;
   } else if (insert_addr) {
@@ -1831,11 +1892,12 @@ retry_insert_2:
       cas_val.val = v;
       cas_and_unlock(GADD(page_addr, ((char *)&insert_addr->lv - page_buffer)),
                      3, cas_ret_buffer, insert_addr->lv.raw, cas_val.raw, ~0ull,
-                     lock_addr, lock_buffer, share_lock, ctx, false);
+                     lock_addr, lock_buffer, share_lock, ctx, true);
       return true;
     }
     insert_addr->lv.raw = cas_ret_buffer[0];
 #endif
+    assert(share_lock);
     goto retry_insert_2;
   }
 
@@ -1923,9 +1985,8 @@ retry_insert_2:
     page->hdr.is_root = false;
   }
 
-  // async since we need to insert split_key in upper layer
   write_and_unlock(page_buffer, page_addr, kLeafPageSize, lock_buffer,
-                   lock_addr, ctx, true, false);
+                   lock_addr, ctx, false, false);
 
   if (root == page_addr) {  // update root
     if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
@@ -2022,7 +2083,7 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
                      sizeof(LeafEntry), cas_buffer, lock_addr, ctx, false,
                      false);
   } else {
-    this->unlock_addr(lock_addr, cas_buffer, ctx, false);
+    this->release_lock(lock_addr, cas_buffer, ctx, false, false);
   }
   return true;
 }
@@ -2113,55 +2174,60 @@ void Tree::coro_master(CoroYield &yield, int coro_cnt) {
   // fflush(stdout);
 }
 
-// // Local Locks
-// inline bool Tree::acquire_local_lock(GlobalAddress lock_addr, CoroContext *ctx,
-//                                      int coro_id) {
-//   auto &node = local_locks[lock_addr.nodeID][lock_addr.offset / 8];
+#ifdef USE_LOCAL_LOCK
+// Local Locks
+inline bool Tree::acquire_local_lock(GlobalAddress lock_addr, CoroContext *ctx,
+                                     int coro_id) {
+  auto &node =
+      local_locks[lock_addr.nodeID][lock_addr.offset / define::kLockSize];
 
-//   uint64_t lock_val = node.ticket_lock.fetch_add(1);
+  uint64_t lock_val = node.ticket_lock.fetch_add(1);
 
-//   uint32_t ticket = lock_val << 32 >> 32;
-//   uint32_t current = lock_val >> 32;
+  uint32_t ticket = lock_val << 32 >> 32;
+  uint32_t current = lock_val >> 32;
 
-//   while (ticket != current) {  // lock failed
+  while (ticket != current) {  // lock failed
 
-//     if (ctx != nullptr) {
-//       hot_wait_queue.push(coro_id);
-//       (*ctx->yield)(*ctx->master);
-//     }
+    if (ctx != nullptr) {
+      hot_wait_queue.push(coro_id);
+      (*ctx->yield)(*ctx->master);
+    }
 
-//     current = node.ticket_lock.load(std::memory_order_relaxed) >> 32;
-//   }
+    current = node.ticket_lock.load(std::memory_order_relaxed) >> 32;
+  }
 
-//   node.hand_time++;
+  node.hand_time++;
 
-//   return node.hand_over;
-// }
+  return node.hand_over;
+}
 
-// inline bool Tree::can_hand_over(GlobalAddress lock_addr) {
-//   auto &node = local_locks[lock_addr.nodeID][lock_addr.offset / 8];
-//   uint64_t lock_val = node.ticket_lock.load(std::memory_order_relaxed);
+inline bool Tree::can_hand_over(GlobalAddress lock_addr) {
+  auto &node =
+      local_locks[lock_addr.nodeID][lock_addr.offset / define::kLockSize];
+  uint64_t lock_val = node.ticket_lock.load(std::memory_order_relaxed);
 
-//   uint32_t ticket = lock_val << 32 >> 32;
-//   uint32_t current = lock_val >> 32;
+  uint32_t ticket = lock_val << 32 >> 32;
+  uint32_t current = lock_val >> 32;
 
-//   if (ticket <= current + 1) {  // no pending locks
-//     node.hand_over = false;
-//   } else {
-//     node.hand_over = node.hand_time < define::kMaxHandOverTime;
-//   }
-//   if (!node.hand_over) {
-//     node.hand_time = 0;
-//   }
+  if (ticket <= current + 1) {  // no pending locks
+    node.hand_over = false;
+  } else {
+    node.hand_over = node.hand_time < define::kMaxHandOverTime;
+  }
+  if (!node.hand_over) {
+    node.hand_time = 0;
+  }
 
-//   return node.hand_over;
-// }
+  return node.hand_over;
+}
 
-// inline void Tree::releases_local_lock(GlobalAddress lock_addr) {
-//   auto &node = local_locks[lock_addr.nodeID][lock_addr.offset / 8];
+inline void Tree::releases_local_lock(GlobalAddress lock_addr) {
+  auto &node =
+      local_locks[lock_addr.nodeID][lock_addr.offset / define::kLockSize];
 
-//   node.ticket_lock.fetch_add((1ull << 32));
-// }
+  node.ticket_lock.fetch_add((1ull << 32));
+}
+#endif
 
 void Tree::index_cache_statistics() {
   index_cache->statistics();

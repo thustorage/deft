@@ -29,7 +29,7 @@
 #define STRUCT_OFFSET(type, field) \
   (char *)&((type *)(0))->field - (char *)((type *)(0))
 
-#define MAX_MACHINE 8
+#define MAX_MACHINE 8 // number of servers
 
 #define ADD_ROUND(x, n) ((x) = ((x) + 1) % (n))
 
@@ -99,7 +99,8 @@ constexpr uint64_t kNumOfLock = kLockChipMemSize / kLockSize;
 constexpr uint64_t kMaxLevelOfTree = 7;
 
 constexpr uint16_t kMaxCoro = 8;
-constexpr int64_t kPerCoroRdmaBuf = 128 * 1024;
+constexpr int64_t kPerThreadRdmaBuf  = 12 * MB;
+constexpr int64_t kPerCoroRdmaBuf = kPerThreadRdmaBuf / kMaxCoro;
 
 constexpr uint8_t kMaxHandOverTime = 0;
 

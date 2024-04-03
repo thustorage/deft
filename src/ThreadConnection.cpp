@@ -4,9 +4,10 @@
 
 ThreadConnection::ThreadConnection(uint16_t threadID, void *cachePool,
                                    uint64_t cacheSize, uint32_t machineNR,
+                                   uint16_t rnic_id,
                                    RemoteConnectionToServer *remote_conn)
     : threadID(threadID), conn_to_server(remote_conn) {
-  createContext(&ctx);
+  createContext(&ctx, rnic_id);
 
   cq = ibv_create_cq(ctx.ctx, RAW_RECV_CQ_COUNT, NULL, NULL, 0);
   // rpc_cq = cq;

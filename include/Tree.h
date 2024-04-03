@@ -56,6 +56,7 @@ struct LocalLockNode {
 
 struct Request {
   bool is_search;
+  bool is_scan;
   Key k;
   Value v;
 };
@@ -682,8 +683,8 @@ class Tree {
   bool leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
                      CoroContext *ctx, int coro_id, bool from_cache = false);
 
-  // bool acquire_local_lock(GlobalAddress lock_addr, CoroContext *ctx,
-  //                         int coro_id);
-  // bool can_hand_over(GlobalAddress lock_addr);
-  // void releases_local_lock(GlobalAddress lock_addr);
+  bool acquire_local_lock(GlobalAddress lock_addr, CoroContext *ctx,
+                          int coro_id);
+  bool can_hand_over(GlobalAddress lock_addr);
+  void releases_local_lock(GlobalAddress lock_addr);
 };

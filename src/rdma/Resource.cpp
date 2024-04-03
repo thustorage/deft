@@ -1,8 +1,7 @@
 #include "Rdma.h"
 
-bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
-                   uint8_t devIndex) {
-
+bool createContext(RdmaContext *context, int rnic_id, uint8_t port,
+                   int gidIndex) {
   ibv_device *dev = NULL;
   ibv_context *ctx = NULL;
   ibv_pd *pd = NULL;
@@ -10,6 +9,7 @@ bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
 
   // get device names in the system
   int devicesNum;
+  int devIndex = 0;
   struct ibv_device **deviceList = ibv_get_device_list(&devicesNum);
   if (!deviceList) {
     Debug::notifyError("failed to get IB devices list");
@@ -25,7 +25,7 @@ bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
 
   for (int i = 0; i < devicesNum; ++i) {
     // printf("Device %d: %s\n", i, ibv_get_device_name(deviceList[i]));
-    if (ibv_get_device_name(deviceList[i])[5] == '0') {
+    if (ibv_get_device_name(deviceList[i])[5] == '0' + rnic_id) {
       devIndex = i;
       break;
     }

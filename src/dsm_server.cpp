@@ -28,9 +28,9 @@ void DSMServer::InitRdmaConnection() {
   conn_to_client_ = new RemoteConnectionToClient[conf_.num_client];
 
   for (int i = 0; i < NR_DIRECTORY; ++i) {
-    dir_con_[i] = new DirectoryConnection(i, (void *)base_addr_,
-                                          conf_.dsm_size * define::GB,
-                                          conf_.num_client, conn_to_client_);
+    dir_con_[i] = new DirectoryConnection(
+        i, (void *)base_addr_, conf_.dsm_size * define::GB, conf_.num_client,
+        conf_.rnic_id, conn_to_client_);
   }
 
   keeper_ = new DSMServerKeeper(dir_con_, conn_to_client_, conf_.num_client);

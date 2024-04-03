@@ -60,8 +60,8 @@ struct Region {
 };
 
 //// Resource.cpp
-bool createContext(RdmaContext *context, uint8_t port = 1, int gidIndex = 3,
-                   uint8_t devIndex = 0);
+bool createContext(RdmaContext *context, int nic_id = 0, uint8_t port = 1,
+                   int gidIndex = 3);
 bool destoryContext(RdmaContext *context);
 
 ibv_mr *createMemoryRegion(uint64_t mm, uint64_t mmSize, RdmaContext *ctx);

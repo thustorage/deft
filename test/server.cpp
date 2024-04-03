@@ -15,6 +15,7 @@
 
 //////////////////// workload parameters /////////////////////
 
+DEFINE_int32(numa_id, 0, "numa node id");
 DEFINE_int32(server_count, 1, "server count");
 DEFINE_int32(client_count, 1, "client count");
 // int kReadRatio;
@@ -35,6 +36,7 @@ int main(int argc, char *argv[]) {
   print_args();
 
   DSMConfig config;
+  config.rnic_id = FLAGS_numa_id;
   config.num_server = FLAGS_server_count;
   config.num_client = FLAGS_client_count;
   dsm_server = DSMServer::GetInstance(config);

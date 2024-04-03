@@ -15,6 +15,7 @@ inline void *hugePageAlloc(size_t size) {
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
     if (res == MAP_FAILED) {
         Debug::notifyError("%s mmap failed!\n", getIP());
+        fflush(stdout);
     }
 
     return res;
