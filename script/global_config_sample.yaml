@@ -3,7 +3,7 @@ app_rel_path: build
 server_app: server
 client_app: client
 
-
+# for SSH remote
 username: xxx
 password: xxx
 
