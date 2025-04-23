@@ -73,7 +73,7 @@ If you use Deft in your research, please cite our paper:
     url = {https://doi.org/10.1145/3689031.3696062},
     doi = {10.1145/3689031.3696062},
     booktitle = {Proceedings of the Twentieth European Conference on Computer Systems},
-    // pages = {TO BE FILLED},
+    pages = {886–901},
     numpages = {16},
     keywords = {Disaggregated Memory, Index, RDMA},
     location = {Rotterdam, Netherlands},
